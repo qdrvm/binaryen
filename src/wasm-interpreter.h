@@ -2422,11 +2422,11 @@ private:
   protected:
     // Returns the instance that defines the memory used by this one.
     SubType* getMemoryInstance() {
-      if (instance.wasm.memory.imported()) {
-        return instance.linkedInstances.at(instance.wasm.memory.module).get();
-      } else {
+      // if (instance.wasm.memory.imported()) {
+      //   return instance.linkedInstances.at(instance.wasm.memory.module).get();
+      // } else {
         return static_cast<SubType*>(&instance);
-      }
+      // }
     }
 
     // Returns a reference to the current value of a potentially imported global
