@@ -2559,9 +2559,9 @@ private:
     // Returns the instance that defines the memory used by this one.
     SubType* getMemoryInstance() {
       auto* inst = instance.self();
-      while (inst->wasm.memory.imported()) {
-        inst = inst->linkedInstances.at(inst->wasm.memory.module).get();
-      }
+      // while (inst->wasm.memory.imported()) {
+      //   inst = inst->linkedInstances.at(inst->wasm.memory.module).get();
+      // }
       return inst;
     }
 
