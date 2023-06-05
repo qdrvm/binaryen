@@ -2,6 +2,15 @@
 # https://packages.ubuntu.com/bionic/cmake
 cmake_minimum_required(VERSION 3.10.2)
 
+
+include(${CMAKE_CURRENT_LIST_DIR}/cmake/HunterGate.cmake)
+
+HunterGate(
+  URL  "https://github.com/soramitsu/soramitsu-hunter/archive/refs/heads/v0.23.257-soramitsu49.zip"
+  SHA1 "a03391d0018024284a360d9e05594d7fa4e42851"
+  LOCAL
+)
+
 # Needed for C++17 (std::variant)
 # TODO(https://github.com/WebAssembly/binaryen/issues/4299): We need
 # to reduce this for compatability with emsdk.
