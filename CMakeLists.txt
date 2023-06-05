@@ -417,10 +417,34 @@ else()
 endif()
 target_link_libraries(binaryen ${CMAKE_THREAD_LIBS_INIT})
 if(INSTALL_LIBS OR NOT BUILD_STATIC_LIB)
-  install(TARGETS binaryen
+  install(TARGETS binaryen EXPORT binaryenTargets
     RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}
     LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
     ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR})
+
+  export(EXPORT binaryenTargets
+    FILE "${CMAKE_CURRENT_BINARY_DIR}/cmake/binaryenTargets.cmake"
+    NAMESPACE binaryen::
+  )
+  configure_file(cmake/binaryenConfig.cmake
+    "${CMAKE_CURRENT_BINARY_DIR}/cmake/binaryenConfig.cmake"
+    COPYONLY
+  )
+
+  install(EXPORT binaryenTargets
+    FILE
+      binaryenTargets.cmake
+    NAMESPACE
+      binaryen::
+    DESTINATION
+      ${CMAKE_INSTALL_LIBDIR}/cmake/binaryen
+  )
+  install(
+    FILES
+      cmake/binaryenConfig.cmake
+    DESTINATION
+      ${CMAKE_INSTALL_LIBDIR}/cmake/binaryen
+  )
 endif()
 if(INSTALL_LIBS)
   install(FILES src/binaryen-c.h src/wasm-delegations.def DESTINATION ${CMAKE_INSTALL_INCLUDEDIR})
