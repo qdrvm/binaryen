@@ -419,7 +419,7 @@ else()
 endif()
 target_link_libraries(binaryen ${CMAKE_THREAD_LIBS_INIT})
 target_include_directories(binaryen PUBLIC
-  $<INSTALL_INTERFACE:"${CMAKE_INSTALL_INCLUDEDIR}/binaryen">
+  "$<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}/binaryen>"
 )
 if(INSTALL_LIBS OR NOT BUILD_STATIC_LIB)
   install(TARGETS binaryen EXPORT binaryenTargets
