@@ -349,7 +349,7 @@ target_include_directories(binaryen PUBLIC
 
   install(DIRECTORY src/ 
     DESTINATION "${CMAKE_INSTALL_INCLUDEDIR}/binaryen" 
-    FILES_MATCHING PATTERN "*.h"
+    FILES_MATCHING PATTERN "*.h" PATTERN "*.def"
   )
 
   export(EXPORT binaryenTargets
