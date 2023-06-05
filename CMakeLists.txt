@@ -336,13 +336,35 @@ else()
   message(STATUS "Building libbinaryen as shared library.")
   add_library(binaryen SHARED ${binaryen_SOURCES} ${binaryen_objs})
 endif()
-install(TARGETS binaryen
-  RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}
-  LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
-  ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR})
+  install(TARGETS binaryen EXPORT binaryenTargets
+    RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}
+    LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
+    ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR})
 
-install(FILES src/binaryen-c.h src/wasm-delegations.h DESTINATION ${CMAKE_INSTALL_INCLUDEDIR})
+  export(EXPORT binaryenTargets
+    FILE "${CMAKE_CURRENT_BINARY_DIR}/cmake/binaryenTargets.cmake"
+    NAMESPACE binaryen::
+  )
+  configure_file(cmake/binaryenConfig.cmake
+    "${CMAKE_CURRENT_BINARY_DIR}/cmake/binaryenConfig.cmake"
+    COPYONLY
+  )
 
+  install(EXPORT binaryenTargets
+    FILE
+      binaryenTargets.cmake
+    NAMESPACE
+      binaryen::
+    DESTINATION
+      ${CMAKE_INSTALL_LIBDIR}/cmake/binaryen
+  )
+  install(
+    FILES
+      cmake/binaryenConfig.cmake
+    DESTINATION
+      ${CMAKE_INSTALL_LIBDIR}/cmake/binaryen
+  )
+  
 function(binaryen_add_executable name sources)
   add_executable(${name} ${sources})
   target_link_libraries(${name} ${CMAKE_THREAD_LIBS_INIT})
