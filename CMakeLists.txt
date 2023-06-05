@@ -131,7 +131,9 @@ endif()
 
 # Compiler setup.
 
-include_directories(${CMAKE_CURRENT_SOURCE_DIR}/src)
+include_directories(
+  $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/src>
+)
 if(BUILD_LLVM_DWARF)
   include_directories(${CMAKE_CURRENT_SOURCE_DIR}/third_party/llvm-project/include)
 endif()
@@ -336,6 +338,10 @@ else()
   message(STATUS "Building libbinaryen as shared library.")
   add_library(binaryen SHARED ${binaryen_SOURCES} ${binaryen_objs})
 endif()
+target_link_libraries(binaryen ${CMAKE_THREAD_LIBS_INIT})
+target_include_directories(binaryen PUBLIC
+  $<INSTALL_INTERFACE:"${CMAKE_INSTALL_INCLUDEDIR}/binaryen">
+)
   install(TARGETS binaryen EXPORT binaryenTargets
     RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}
     LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
