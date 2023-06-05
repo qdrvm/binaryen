@@ -19,9 +19,8 @@
 
 #include "wasm.h"
 
-namespace wasm {
+namespace wasm::ExpressionManipulator {
 
-namespace ExpressionManipulator {
 // Re-use a node's memory. This helps avoid allocation when optimizing.
 template<typename InputType, typename OutputType>
 inline OutputType* convert(InputType* input) {
@@ -42,6 +41,7 @@ template<typename InputType> inline Nop* nop(InputType* target) {
 
 template<typename InputType>
 inline RefNull* refNull(InputType* target, Type type) {
+  assert(type.isNullable() && type.getHeapType().isBottom());
   auto* ret = convert<InputType, RefNull>(target);
   ret->finalize(type);
   return ret;
@@ -75,8 +75,6 @@ inline Expression* copy(Expression* original, Module& wasm) {
 
 // Splice an item into the middle of a block's list
 void spliceIntoBlock(Block* block, Index index, Expression* add);
-} // namespace ExpressionManipulator
-
-} // namespace wasm
+} // namespace wasm::ExpressionManipulator
 
 #endif // wams_ir_manipulation_h

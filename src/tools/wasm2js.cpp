@@ -39,7 +39,9 @@ static void optimizeWasm(Module& wasm, PassOptions options) {
   struct OptimizeForJS : public WalkerPass<PostWalker<OptimizeForJS>> {
     bool isFunctionParallel() override { return true; }
 
-    Pass* create() override { return new OptimizeForJS; }
+    std::unique_ptr<Pass> create() override {
+      return std::make_unique<OptimizeForJS>();
+    }
 
     void visitBinary(Binary* curr) {
       // x - -c (where c is a constant) is larger than x + c, in js (but not
@@ -786,13 +788,6 @@ void AssertionEmitter::fixCalls(Ref asmjs, Name asmModule) {
 }
 
 void AssertionEmitter::emit() {
-  // TODO: nan and infinity shouldn't be needed once literal asm.js code isn't
-  // generated
-  out << R"(
-    var nan = NaN;
-    var infinity = Infinity;
-  )";
-
   // When equating floating point values in spec tests we want to use bitwise
   // equality like wasm does. Unfortunately though NaN makes this tricky. JS
   // implementations like Spidermonkey and JSC will canonicalize NaN loads from
@@ -832,7 +827,7 @@ void AssertionEmitter::emit() {
   )";
 
   Builder wasmBuilder(sexpBuilder.getModule());
-  Name asmModule = std::string("ret") + ASM_FUNC.str;
+  Name asmModule = std::string("ret") + ASM_FUNC.toString();
   // Track the last built module.
   Module wasm;
   for (size_t i = 0; i < root.size(); ++i) {
@@ -841,11 +836,11 @@ void AssertionEmitter::emit() {
         e[0]->str() == Name("module")) {
       ModuleUtils::clearModule(wasm);
       std::stringstream funcNameS;
-      funcNameS << ASM_FUNC.c_str() << i;
+      funcNameS << ASM_FUNC << i;
       std::stringstream moduleNameS;
-      moduleNameS << "ret" << ASM_FUNC.c_str() << i;
-      Name funcName(funcNameS.str().c_str());
-      asmModule = Name(moduleNameS.str().c_str());
+      moduleNameS << "ret" << ASM_FUNC << i;
+      Name funcName(funcNameS.str());
+      asmModule = Name(moduleNameS.str());
       options.applyFeatures(wasm);
       SExpressionWasmBuilder builder(wasm, e, options.profile);
       emitWasm(wasm, out, flags, options.passOptions, funcName);
@@ -855,13 +850,13 @@ void AssertionEmitter::emit() {
       std::cerr << "skipping " << e << std::endl;
       continue;
     }
-    Name testFuncName(IString(("check" + std::to_string(i)).c_str(), false));
+    Name testFuncName("check" + std::to_string(i));
     bool isInvoke = (e[0]->str() == Name("invoke"));
     bool isReturn = (e[0]->str() == Name("assert_return"));
     bool isReturnNan = (e[0]->str() == Name("assert_return_nan"));
     if (isInvoke) {
       emitInvokeFunc(wasmBuilder, wasm, e, testFuncName, asmModule);
-      out << testFuncName.str << "();\n";
+      out << testFuncName << "();\n";
       continue;
     }
     // Otherwise, this is some form of assertion.
@@ -873,7 +868,7 @@ void AssertionEmitter::emit() {
       emitAssertTrapFunc(wasmBuilder, wasm, e, testFuncName, asmModule);
     }
 
-    out << "if (!" << testFuncName.str << "()) throw 'assertion failed: " << e
+    out << "if (!" << testFuncName << "()) throw 'assertion failed: " << e
         << "';\n";
   }
 }
@@ -884,12 +879,16 @@ void AssertionEmitter::emit() {
 
 int main(int argc, const char* argv[]) {
   Wasm2JSBuilder::Flags flags;
+
+  const std::string Wasm2JSOption = "wasm2js options";
+
   OptimizationOptions options("wasm2js",
                               "Transform .wasm/.wat files to asm.js");
   options
     .add("--output",
          "-o",
          "Output file (stdout if not specified)",
+         Wasm2JSOption,
          Options::Arguments::One,
          [](Options* o, const std::string& argument) {
            o->extra["output"] = argument;
@@ -898,6 +897,7 @@ int main(int argc, const char* argv[]) {
     .add("--allow-asserts",
          "",
          "Allow compilation of .wast testing asserts",
+         Wasm2JSOption,
          Options::Arguments::Zero,
          [&](Options* o, const std::string& argument) {
            flags.allowAsserts = true;
@@ -907,6 +907,7 @@ int main(int argc, const char* argv[]) {
       "--pedantic",
       "",
       "Emulate WebAssembly trapping behavior",
+      Wasm2JSOption,
       Options::Arguments::Zero,
       [&](Options* o, const std::string& argument) { flags.pedantic = true; })
     .add(
@@ -914,6 +915,7 @@ int main(int argc, const char* argv[]) {
       "",
       "Emulate the glue in emscripten-compatible form (and not ES6 module "
       "form)",
+      Wasm2JSOption,
       Options::Arguments::Zero,
       [&](Options* o, const std::string& argument) { flags.emscripten = true; })
     .add(
@@ -924,6 +926,7 @@ int main(int argc, const char* argv[]) {
       "out of bounds or integer divide by zero; with this flag, we try to be "
       "deterministic at least in what happens, which might or might not be "
       "to trap like wasm, but at least should not vary)",
+      Wasm2JSOption,
       Options::Arguments::Zero,
       [&](Options* o, const std::string& argument) {
         flags.deterministic = true;
@@ -932,6 +935,7 @@ int main(int argc, const char* argv[]) {
       "--symbols-file",
       "",
       "Emit a symbols file that maps function indexes to their original names",
+      Wasm2JSOption,
       Options::Arguments::One,
       [&](Options* o, const std::string& argument) {
         flags.symbolsFile = argument;
@@ -977,14 +981,14 @@ int main(int argc, const char* argv[]) {
       if (options.debug) {
         std::cerr << "s-parsing..." << std::endl;
       }
-      sexprParser = make_unique<SExpressionParser>(input.data());
+      sexprParser = std::make_unique<SExpressionParser>(input.data());
       root = sexprParser->root;
 
       if (options.debug) {
         std::cerr << "w-parsing..." << std::endl;
       }
-      sexprBuilder =
-        make_unique<SExpressionWasmBuilder>(wasm, *(*root)[0], options.profile);
+      sexprBuilder = std::make_unique<SExpressionWasmBuilder>(
+        wasm, *(*root)[0], options.profile);
     }
   } catch (ParseException& p) {
     p.dump(std::cerr);

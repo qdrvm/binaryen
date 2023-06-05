@@ -70,7 +70,11 @@ There are a few differences between Binaryen IR and the WebAssembly language:
      multivalue instructions and blocks, it is represented with tuple types that
      do not exist in the WebAssembly language. In addition to multivalue
      instructions, locals and globals can also have tuple types in Binaryen IR
-     but not in WebAssembly.
+     but not in WebAssembly. Experiments show that better support for
+     multivalue could enable useful but small code size savings of 1-3%, so it
+     has not been worth changing the core IR structure to support it better.
+   * Block input values (currently only supported in `catch` blocks in the
+     exception handling feature) are represented as `pop` subexpressions.
  * Types and unreachable code
    * WebAssembly limits block/if/loop types to none and the concrete value types
      (i32, i64, f32, f64). Binaryen IR has an unreachable type, and it allows
@@ -107,25 +111,31 @@ There are a few differences between Binaryen IR and the WebAssembly language:
      emitted when generating wasm. Instead its list of operands will be directly
      used in the containing node. Such a block is sometimes called an "implicit
      block".
- * Multivalue
-   * Binaryen will not represent multivalue instructions and values directly.
-     Binaryen's main focus is on optimization of wasm, and therefore the question
-     of whether we should have multivalue in the main IR is whether it justifes
-     the extra complexity there. Experiments show that the shrinking of code
-     size thanks to multivalue is useful but small, just 1-3% or so. Given that,
-     we prefer to keep the main IR simple, and focus on multivalue optimizations
-     in Stack IR, which is more suitable for such things.
-   * Binaryen does still need to implement the "ABI" level of multivalue, that
-     is, we need multivalue calls because those may cross module boundaries,
-     and so they are observable externally. To support that, Binaryen may use
-     `push` and `pop` as mentioned earlier; another option is to add LLVM-like
-     `extractvalue/composevalue` instructions.
  * Reference Types
   * The wasm text and binary formats require that a function whose address is
     taken by `ref.func` must be either in the table, or declared via an
     `(elem declare func $..)`. Binaryen will emit that data when necessary, but
     it does not represent it in IR. That is, IR can be worked on without needing
     to think about declaring function references.
+  * Binaryen IR allows non-nullable locals in the form that the wasm spec does,
+    (which was historically nicknamed "1a"), in which a `local.get` must be
+    structurally dominated by a `local.set` in order to validate (that ensures
+    we do not read the default value of null). Despite being aligned with the
+    wasm spec, there are some minor details that you may notice:
+    * A nameless `Block` in Binaryen IR does not interfere with validation.
+      Nameless blocks are never emitted into the binary format (we just emit
+      their contents), so we ignore them for purposes of non-nullable locals. As
+      a result, if you read wasm text emitted by Binaryen then you may see what
+      seems to be code that should not validate per the spec (and may not
+      validate in wasm text parsers), but that difference will not exist in the
+      binary format (binaries emitted by Binaryen will always work everywhere,
+      aside for bugs of course).
+    * The Binaryen pass runner will automatically fix up validation after each
+      pass (finding things that do not validate and fixing them up, usually by
+      demoting a local to be nullable). As a result you do not need to worry
+      much about this when writing Binaryen passes. For more details see the
+      `requiresNonNullableLocalFixups()` hook in `pass.h` and the
+      `LocalStructuralDominance` class.
 
 As a result, you might notice that round-trip conversions (wasm => Binaryen IR
 => wasm) change code a little in some corner cases.
@@ -150,6 +160,46 @@ Notes when working with Binaryen IR:
    incorrectly.
  * For similar reasons, nodes should not appear in more than one functions.
 
+### Intrinsics
+
+Binaryen intrinsic functions look like calls to imports, e.g.,
+
+```wat
+(import "binaryen-intrinsics" "foo" (func $foo))
+```
+
+Implementing them that way allows them to be read and written by other tools,
+and it avoids confusing errors on a binary format error that could happen in
+those tools if we had a custom binary format extension.
+
+An intrinsic method may be optimized away by the optimizer. If it is not, it
+must be **lowered** before shipping the wasm, as otherwise it will look like a
+call to an import that does not exist (and VMs will show an error on not having
+a proper value for that import). That final lowering is *not* done
+automatically. A user of intrinsics must run the pass for that explicitly,
+because the tools do not know when the user intends to finish optimizing, as the
+user may have a pipeline of multiple optimization steps, or may be doing local
+experimentation, or fuzzing/reducing, etc. Only the user knows when the final
+optimization happens before the wasm is "final" and ready to be shipped. Note
+that, in general, some additional optimizations may be possible after the final
+lowering, and so a useful pattern is to  optimize once normally with intrinsics,
+then lower them away, then optimize after that, e.g.:
+
+```
+wasm-opt input.wasm -o output.wasm  -O --intrinsic-lowering -O
+```
+
+Each intrinsic defines its semantics, which includes what the optimizer is
+allowed to do with it and what the final lowering will turn it to. See
+[intrinsics.h](https://github.com/WebAssembly/binaryen/blob/main/src/ir/intrinsics.h)
+for the detailed definitions. A quick summary appears here:
+
+* `call.without.effects`: Similar to a `call_ref` in that it receives
+  parameters, and a reference to a function to call, and calls that function
+  with those parameters, except that the optimizer can assume the call has no
+  side effects, and may be able to optimize it out (if it does not have a
+  result that is used, generally).
+
 ## Tools
 
 This repository contains code that builds the following tools in `bin/`:
@@ -171,9 +221,12 @@ This repository contains code that builds the following tools in `bin/`:
    also run the spec test suite.
  * **wasm-emscripten-finalize**: Takes a wasm binary produced by llvm+lld and
    performs emscripten-specific passes over it.
- * **wasm-ctor-eval**: A tool that can execute C++ global constructors ahead of
-   time. Used by Emscripten.
- * **binaryen.js**: A standalone JavaScript library that exposes Binaryen methods for [creating and optimizing WASM modules](https://github.com/WebAssembly/binaryen/blob/main/test/binaryen.js/hello-world.js). For builds, see [binaryen.js on npm](https://www.npmjs.com/package/binaryen) (or download it directly from [github](https://raw.githubusercontent.com/AssemblyScript/binaryen.js/master/index.js), [rawgit](https://cdn.rawgit.com/AssemblyScript/binaryen.js/master/index.js), or [unpkg](https://unpkg.com/binaryen@latest/index.js)).
+ * **wasm-ctor-eval**: A tool that can execute functions (or parts of functions)
+   at compile time.
+ * **wasm-merge**: Merges multiple wasm files into a single file, connecting
+   corresponding imports to exports as it does so. Like a bundler for JS, but
+   for wasm.
+ * **binaryen.js**: A standalone JavaScript library that exposes Binaryen methods for [creating and optimizing Wasm modules](https://github.com/WebAssembly/binaryen/blob/main/test/binaryen.js/hello-world.js). For builds, see [binaryen.js on npm](https://www.npmjs.com/package/binaryen) (or download it directly from [github](https://raw.githubusercontent.com/AssemblyScript/binaryen.js/master/index.js), [rawgit](https://cdn.rawgit.com/AssemblyScript/binaryen.js/master/index.js), or [unpkg](https://unpkg.com/binaryen@latest/index.js)). Minimal requirements: Node.js v15.8 or Chrome v75 or Firefox v78.
 
 Usage instructions for each are below.
 
@@ -274,13 +327,24 @@ etc.
 
 ## Building
 
+Binaryen uses git submodules (at time of writing just for gtest), so before you build you will have to initialize the submodules:
+
+```
+git submodule init
+git submodule update
+```
+
+After that you can build with CMake:
+
 ```
 cmake . && make
 ```
 
-A C++14 compiler is required. Note that you can also use `ninja` as your generator: `cmake -G Ninja . && ninja`.
+A C++17 compiler is required. Note that you can also use `ninja` as your generator: `cmake -G Ninja . && ninja`.
 
-Binaryen.js can be built using Emscripten, which can be installed via [the SDK](http://kripken.github.io/emscripten-site/docs/getting_started/downloads.html)).
+To avoid the gtest dependency, you can pass `-DBUILD_TESTS=OFF` to cmake.
+
+Binaryen.js can be built using Emscripten, which can be installed via [the SDK](http://kripken.github.io/emscripten-site/docs/getting_started/downloads.html).
 
 ```
 emcmake cmake . && emmake make binaryen_js
@@ -325,28 +389,31 @@ passes on it, as well as print it (before and/or after the transformations). For
 example, try
 
 ````
-bin/wasm-opt test/passes/lower-if-else.wat --print
+bin/wasm-opt test/lit/passes/name-types.wast -all -S -o -
 ````
 
-That will pretty-print out one of the test cases in the test suite. To run a
+That will output one of the test cases in the test suite. To run a
 transformation pass on it, try
 
 ````
-bin/wasm-opt test/passes/lower-if-else.wat --print --lower-if-else
+bin/wasm-opt test/lit/passes/name-types.wast --name-types -all -S -o -
 ````
 
-The `lower-if-else` pass lowers if-else into a block and a break. You can see
-the change the transformation causes by comparing the output of the two print
-commands.
+The `name-types` pass ensures each type has a name and renames exceptionally long type names. You can see
+the change the transformation causes by comparing the output of the two commands.
 
 It's easy to add your own transformation passes to the shell, just add `.cpp`
 files into `src/passes`, and rebuild the shell. For example code, take a look at
-the [`lower-if-else` pass](https://github.com/WebAssembly/binaryen/blob/main/src/passes/LowerIfElse.cpp).
+the [`name-types` pass](https://github.com/WebAssembly/binaryen/blob/main/src/passes/NameTypes.cpp).
 
 Some more notes:
 
  * See `bin/wasm-opt --help` for the full list of options and passes.
- * Passing `--debug` will emit some debugging info.
+ * Passing `--debug` will emit some debugging info.  Individual debug channels
+   (defined in the source code via `#define DEBUG_TYPE xxx`) can be enabled by
+   passing them as list of comma-separated strings.  For example: `bin/wasm-opt
+   --debug=binary`.  These debug channels can also be enabled via the
+   `BINARYEN_DEBUG` environment variable.
 
 ### wasm2js
 
@@ -361,7 +428,7 @@ This will print out JavaScript to the console.
 For example, try
 
 ```
-$ bin/wasm2js test/hello_world.wat
+bin/wasm2js test/hello_world.wat
 ```
 
 That output contains
@@ -418,6 +485,230 @@ Things keep to in mind with wasm2js's output:
    int/float conversions do not trap, and so forth. There may also be slight
    differences in corner cases of conversions, like non-trapping float to int.
 
+### wasm-ctor-eval
+
+`wasm-ctor-eval` executes functions, or parts of them, at compile time.
+After doing so it serializes the runtime state into the wasm, which is like
+taking a "snapshot". When the wasm is later loaded and run in a VM, it will
+continue execution from that point, without re-doing the work that was already
+executed.
+
+For example, consider this small program:
+
+```wat
+(module
+ ;; A global variable that begins at 0.
+ (global $global (mut i32) (i32.const 0))
+
+ (import "import" "import" (func $import))
+
+ (func "main"
+  ;; Set the global to 1.
+  (global.set $global
+   (i32.const 1))
+
+  ;; Call the imported function. This *cannot* be executed at
+  ;; compile time.
+  (call $import)
+
+  ;; We will never get to this point, since we stop at the
+  ;; import.
+  (global.set $global
+   (i32.const 2))
+ )
+)
+```
+
+We can evaluate part of it at compile time like this:
+
+```
+wasm-ctor-eval input.wat --ctors=main -S -o -
+```
+
+This tells it that there is a single function that we want to execute ("ctor"
+is short for "global constructor", a name that comes from code that is executed
+before a program's entry point) and then to print it as text to `stdout`. The
+result is this:
+
+```wat
+trying to eval main
+  ...partial evalling successful, but stopping since could not eval: call import: import.import
+  ...stopping
+(module
+ (type $none_=>_none (func))
+ (import "import" "import" (func $import))
+ (global $global (mut i32) (i32.const 1))
+ (export "main" (func $0_0))
+ (func $0_0
+  (call $import)
+  (global.set $global
+   (i32.const 2)
+  )
+ )
+)
+```
+
+The logging shows us managing to eval part of `main()`, but not all of it, as
+expected: We can eval the first `global.get`, but then we stop at the call to
+the imported function (because we don't know what that function will be when the
+wasm is actually run in a VM later). Note how in the output wasm the global's
+value has been updated from 0 to 1, and that the first `global.get` has been
+removed: the wasm is now in a state that, when we run it in a VM, will seamlessly
+continue to run from the point at which `wasm-ctor-eval` stopped.
+
+In this tiny example we just saved a small amount of work. How much work can be
+saved depends on your program. (It can help to do pure computation up front, and
+leave calls to imports to as late as possible.)
+
+Note that `wasm-ctor-eval`'s name is related to global constructor functions,
+as mentioned earlier, but there is no limitation on what you can execute here.
+Any export from the wasm can be executed, if its contents are suitable. For
+example, in Emscripten `wasm-ctor-eval` is even run on `main()` when possible.
+
+### wasm-merge
+
+`wasm-merge` combines wasm files together. For example, imagine you have a
+project that uses wasm files from multiple toolchains. Then it can be helpful to
+merge them all into a single wasm file before shipping, since in a single wasm
+file the calls between the modules become just normal calls inside a module,
+which allows them to be inlined, dead code eliminated, and so forth, potentially
+improving speed and size.
+
+For example, imagine we have these two wasm files:
+
+```wat
+;; a.wasm
+(module
+  (import "second" "bar" (func $second.bar))
+
+  (export "main" (func $func))
+
+  (func $func
+    (call $second.bar)
+  )
+)
+```
+
+```wat
+;; b.wasm
+(module
+  (import "outside" "log" (func $log (param i32)))
+
+  (export "bar" (func $func))
+
+  (func $func
+    (call $log
+      (i32.const 42)
+    )
+  )
+)
+```
+
+The filenames on your local drive are `a.wasm` and `b.wasm`, but for merging /
+bundling purposes let's say that the first is known as `"first"` and the second
+as `"second"`. That is, we want the first module's import of `"second.bar"` to
+call the function `$func` in the second module. Here is a wasm-merge command for
+that:
+
+```
+wasm-merge a.wasm first b.wasm second -o output.wasm
+```
+
+We give it the first wasm file, then its name, and then the second wasm file
+and then its name. The merged output is this:
+
+```wat
+(module
+  (import "second" "bar" (func $second.bar))
+  (import "outside" "log" (func $log (param i32)))
+
+  (export "main" (func $func))
+  (export "bar" (func $func_2))
+
+  (func $func
+    (call $func_2)
+  )
+
+  (func $func_2
+    (call $log
+      (i32.const 42)
+    )
+  )
+)
+```
+
+`wasm-merge` combined the two files into one, merging their functions, imports,
+etc., all while fixing up name conflicts and connecting corresponding imports to
+exports. In particular, note how `$func` calls `$func_2`, which is exactly what
+we wanted: `$func_2` is the function from the second module (renamed to avoid a
+name collision).
+
+Note that the wasm output in this example could benefit from additional
+optimization. First, the call to `$func_2` can now be easily inlined, so we can
+run `wasm-opt -O3` to do that for us. Also, we may not need all the imports and
+exports, for which we can run
+[wasm-metadce](https://github.com/WebAssembly/binaryen/wiki/Pruning-unneeded-code-in-wasm-files-with-wasm-metadce#example-pruning-exports).
+A good workflow could be to run `wasm-merge`, then `wasm-metadce`, then finish
+with `wasm-opt`.
+
+`wasm-merge` is kind of like a bundler for wasm files, in the sense of a "JS
+bundler" but for wasm. That is, with the wasm files above, imagine that we had
+this JS code to instantiate and connect them at runtime:
+
+```js
+// Compile the first module.
+var first = await fetch("a.wasm");
+first = new WebAssembly.Module(first);
+
+// Compile the first module.
+var second = await fetch("b.wasm");
+second = new WebAssembly.Module(second);
+
+// Instantiate the second, with a JS import.
+second = new WebAssembly.Instance(second, {
+  outside: {
+    log: (value) => {
+      console.log('value:', value);
+    }
+  }
+});
+
+// Instantiate the first, importing from the second.
+first = new WebAssembly.Instance(first, {
+  second: second.exports
+});
+
+// Call the main function.
+first.exports.main();
+```
+
+What `wasm-merge` does is basically what that JS does: it hooks up imports to
+exports, resolving names using the module names you provided. That is, by
+running `wasm-merge` we are moving the work of connecting the modules from
+runtime to compile time. As a result, after running `wasm-merge` we need a lot
+less JS to get the same result:
+
+```js
+// Compile the single module.
+var merged = await fetch("merged.wasm");
+merged = new WebAssembly.Module(merged);
+
+// Instantiate it with a JS import.
+merged = new WebAssembly.Instance(merged, {
+  outside: {
+    log: (value) => {
+      console.log('value:', value);
+    }
+  }
+});
+
+// Call the main function.
+merged.exports.main();
+```
+
+We still need to fetch and compile the merged wasm, and to provide it the JS
+import, but the work to connect two wasm modules is not needed any more.
+
 ## Testing
 
 ```
@@ -440,6 +731,19 @@ The `check.py` script supports some options:
    tool cannot be found, and you'll see a warning.
  * We have tests from upstream in `tests/spec`, in git submodules. Running
    `./check.py` should update those.
+
+Note that we are trying to gradually port the legacy wasm-opt tests to use `lit`
+and `filecheck` as we modify them.  For `passes` tests that output wast, this
+can be done automatically with `scripts/port_passes_tests_to_lit.py` and for
+non-`passes` tests that output wast, see
+https://github.com/WebAssembly/binaryen/pull/4779 for an example of how to do a
+simple manual port.
+
+For lit tests the test expectations (the CHECK lines) can often be automatically
+updated as changes are made to binaryen.  See `scripts/update_lit_checks.py`.
+
+Non-lit tests can also be automatically updated in most cases.  See
+`scripts/auto_update_tests.py`.
 
 ### Setting up dependencies
 
@@ -490,13 +794,13 @@ Emscripten's WebAssembly processing library (`wasm-emscripten`).
 * Does it compile under Windows and/or Visual Studio?
 
 Yes, it does. Here's a step-by-step [tutorial][win32]  on how to compile it
-under **Windows 10 x64** with with **CMake** and **Visual Studio 2015**. 
+under **Windows 10 x64** with with **CMake** and **Visual Studio 2015**.
 However, Visual Studio 2017 may now be required. Help would be appreciated on
 Windows and OS X as most of the core devs are on Linux.
 
 [compiling to WebAssembly]: https://github.com/WebAssembly/binaryen/wiki/Compiling-to-WebAssembly-with-Binaryen
 [win32]: https://github.com/brakmic/bazaar/blob/master/webassembly/COMPILING_WIN32.md
-[C API]: https://github.com/WebAssembly/binaryen/wiki/Compiling-to-WebAssembly-with-Binaryen#c-api-1
+[C API]: https://github.com/WebAssembly/binaryen/wiki/Compiling-to-WebAssembly-with-Binaryen#c-api
 [control flow graph]: https://github.com/WebAssembly/binaryen/wiki/Compiling-to-WebAssembly-with-Binaryen#cfg-api
 [JS_API]: https://github.com/WebAssembly/binaryen/wiki/binaryen.js-API
 [compile_to_wasm]: https://github.com/WebAssembly/binaryen/wiki/Compiling-to-WebAssembly-with-Binaryen#what-do-i-need-to-have-in-order-to-use-binaryen-to-compile-to-webassembly

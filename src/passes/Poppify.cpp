@@ -87,8 +87,8 @@ namespace {
 
 // Generate names for the elements of tuple globals
 Name getGlobalElem(Module* module, Name global, Index i) {
-  return Names::getValidGlobalName(
-    *module, std::string(global.c_str()) + '$' + std::to_string(i));
+  return Names::getValidGlobalName(*module,
+                                   global.toString() + '$' + std::to_string(i));
 }
 
 struct Poppifier : BinaryenIRWriter<Poppifier> {
@@ -243,16 +243,14 @@ void Poppifier::emit(Expression* curr) {
 };
 
 void Poppifier::emitIfElse(If* curr) {
-  auto& scope = scopeStack.back();
-  WASM_UNUSED(scope);
+  [[maybe_unused]] auto& scope = scopeStack.back();
   assert(scope.kind == Scope::If);
   patchScope(curr->ifTrue);
   scopeStack.emplace_back(Scope::Else);
 }
 
 void Poppifier::emitCatch(Try* curr, Index i) {
-  auto& scope = scopeStack.back();
-  WASM_UNUSED(scope);
+  [[maybe_unused]] auto& scope = scopeStack.back();
   if (i == 0) {
     assert(scope.kind == Scope::Try);
     patchScope(curr->body);
@@ -264,8 +262,7 @@ void Poppifier::emitCatch(Try* curr, Index i) {
 }
 
 void Poppifier::emitCatchAll(Try* curr) {
-  auto& scope = scopeStack.back();
-  WASM_UNUSED(scope);
+  [[maybe_unused]] auto& scope = scopeStack.back();
   if (curr->catchBodies.size() == 1) {
     assert(scope.kind == Scope::Try);
     patchScope(curr->body);
@@ -277,8 +274,7 @@ void Poppifier::emitCatchAll(Try* curr) {
 }
 
 void Poppifier::emitDelegate(Try* curr) {
-  auto& scope = scopeStack.back();
-  WASM_UNUSED(scope);
+  [[maybe_unused]] auto& scope = scopeStack.back();
   assert(scope.kind == Scope::Try);
   patchScope(curr->body);
   scopeStack.back().instrs.push_back(curr);
@@ -310,8 +306,7 @@ void Poppifier::emitScopeEnd(Expression* curr) {
 }
 
 void Poppifier::emitFunctionEnd() {
-  auto& scope = scopeStack.back();
-  WASM_UNUSED(scope);
+  [[maybe_unused]] auto& scope = scopeStack.back();
   assert(scope.kind == Scope::Func);
   patchScope(func->body);
 }
@@ -447,21 +442,22 @@ void Poppifier::poppify(Expression* expr) {
 
 class PoppifyFunctionsPass : public Pass {
   bool isFunctionParallel() override { return true; }
-  void
-  runOnFunction(PassRunner* runner, Module* module, Function* func) override {
+  void runOnFunction(Module* module, Function* func) override {
     if (func->profile != IRProfile::Poppy) {
       Poppifier(func, module).write();
       func->profile = IRProfile::Poppy;
     }
   }
-  Pass* create() override { return new PoppifyFunctionsPass; }
+  std::unique_ptr<Pass> create() override {
+    return std::make_unique<PoppifyFunctionsPass>();
+  }
 };
 
 } // anonymous namespace
 
 class PoppifyPass : public Pass {
-  void run(PassRunner* runner, Module* module) {
-    PassRunner subRunner(runner);
+  void run(Module* module) {
+    PassRunner subRunner(getPassRunner());
     subRunner.add(std::make_unique<PoppifyFunctionsPass>());
     // TODO: Enable this once it handles Poppy blocks correctly
     // subRunner.add(std::make_unique<ReFinalize>());

@@ -5,7 +5,9 @@ set(support_SOURCES
   colors.cpp
   command-line.cpp
   debug.cpp
+  dfa_minimization.cpp
   file.cpp
+  istring.cpp
   path.cpp
   safe_integer.cpp
   threads.cpp

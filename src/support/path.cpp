@@ -20,9 +20,7 @@
 
 #include "support/path.h"
 
-namespace wasm {
-
-namespace Path {
+namespace wasm::Path {
 
 char getPathSeparator() {
   // TODO: use c++17's path separator
@@ -83,7 +81,7 @@ std::string getBinaryenBinDir() {
 
 void setBinaryenBinDir(const std::string& dir) {
   binDir = dir;
-  if (binDir.back() != getPathSeparator()) {
+  if (binDir.empty() || binDir.back() != getPathSeparator()) {
     binDir += getPathSeparator();
   }
 }
@@ -93,6 +91,4 @@ std::string getBinaryenBinaryTool(const std::string& name) {
   return getBinaryenBinDir() + name;
 }
 
-} // namespace Path
-
-} // namespace wasm
+} // namespace wasm::Path

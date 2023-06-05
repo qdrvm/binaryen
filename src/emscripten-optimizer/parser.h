@@ -30,10 +30,45 @@
 #include <limits>
 #include <vector>
 
-#include "istring.h"
+#include "support/istring.h"
 #include "support/safe_integer.h"
 
 namespace cashew {
+
+using IString = wasm::IString;
+
+// IStringSet
+
+class IStringSet : public std::unordered_set<IString> {
+  std::vector<char> data;
+
+public:
+  IStringSet() = default;
+  IStringSet(const char* init) { // comma-delimited list
+    int size = strlen(init) + 1;
+    data.resize(size);
+    char* curr = &data[0];
+    strncpy(curr, init, size);
+    while (1) {
+      char* end = strchr(curr, ' ');
+      if (end) {
+        *end = 0;
+      }
+      insert(curr);
+      if (!end) {
+        break;
+      }
+      curr = end + 1;
+    }
+  }
+
+  bool has(const IString& str) { return count(str) > 0; }
+};
+
+class IOrderedStringSet : public std::set<IString> {
+public:
+  bool has(const IString& str) { return count(str) > 0; }
+};
 
 // common strings
 
@@ -124,6 +159,8 @@ extern IString ATOMICS;
 extern IString COMPARE_EXCHANGE;
 extern IString LOAD;
 extern IString STORE;
+extern IString GETTER;
+extern IString SETTER;
 
 extern IStringSet keywords;
 
@@ -207,8 +244,8 @@ template<class NodeRef, class Builder> class Parser {
   };
 
   struct Frag {
-  // MSVC does not allow unrestricted unions:
-  // http://www.open-std.org/jtc1/sc22/wg21/docs/papers/2008/n2544.pdf
+    // MSVC does not allow unrestricted unions:
+    // http://www.open-std.org/jtc1/sc22/wg21/docs/papers/2008/n2544.pdf
 #ifndef _MSC_VER
     union {
 #endif
@@ -231,11 +268,11 @@ template<class NodeRef, class Builder> class Parser {
           src++;
         }
         if (*src == 0) {
-          str.set(start);
+          str = IString(start);
         } else {
           char temp = *src;
           *src = 0;
-          str.set(start, false);
+          str = IString(start, false);
           *src = temp;
         }
         type = keywords.has(str) ? KEYWORD : IDENT;
@@ -331,11 +368,11 @@ template<class NodeRef, class Builder> class Parser {
           default:
             abort();
         }
-        size = strlen(str.str);
+        size = str.size();
 #ifndef NDEBUG
         char temp = start[size];
         start[size] = 0;
-        assert(strcmp(str.str, start) == 0);
+        assert(str.str == start);
         start[size] = temp;
 #endif
         type = OPERATOR;
@@ -344,13 +381,13 @@ template<class NodeRef, class Builder> class Parser {
         type = SEPARATOR;
         char temp = src[1];
         src[1] = 0;
-        str.set(src, false);
+        str = IString(src, false);
         src[1] = temp;
         src++;
       } else if (*src == '"' || *src == '\'') {
         char* end = strchr(src + 1, *src);
         *end = 0;
-        str.set(src + 1);
+        str = IString(src + 1);
         src = end + 1;
         type = STRING;
       } else {
@@ -389,7 +426,7 @@ template<class NodeRef, class Builder> class Parser {
   // This is a list of the current stack of node-operator-node-operator-etc.
   // this works by each parseExpression call appending to the vector; then
   // recursing out, and the toplevel sorts it all
-  typedef std::vector<ExpressionElement> ExpressionParts;
+  using ExpressionParts = std::vector<ExpressionElement>;
   std::vector<ExpressionParts> expressionPartsStack;
 
   // Parses an element in a list of such elements, e.g. list of statements in a

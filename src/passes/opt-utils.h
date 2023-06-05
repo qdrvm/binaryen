@@ -37,7 +37,7 @@ inline void optimizeAfterInlining(const std::unordered_set<Function*>& funcs,
   // save the full list of functions on the side
   std::vector<std::unique_ptr<Function>> all;
   all.swap(module->functions);
-  module->updateMaps();
+  module->updateFunctionsMap();
   for (auto& func : funcs) {
     module->addFunction(func);
   }
@@ -53,7 +53,7 @@ inline void optimizeAfterInlining(const std::unordered_set<Function*>& funcs,
     func.release();
   }
   all.swap(module->functions);
-  module->updateMaps();
+  module->updateFunctionsMap();
 }
 
 struct FunctionRefReplacer
@@ -64,8 +64,8 @@ struct FunctionRefReplacer
 
   FunctionRefReplacer(MaybeReplace maybeReplace) : maybeReplace(maybeReplace) {}
 
-  FunctionRefReplacer* create() override {
-    return new FunctionRefReplacer(maybeReplace);
+  std::unique_ptr<Pass> create() override {
+    return std::make_unique<FunctionRefReplacer>(maybeReplace);
   }
 
   void visitCall(Call* curr) { maybeReplace(curr->target); }
@@ -88,7 +88,7 @@ inline void replaceFunctions(PassRunner* runner,
   // replace direct calls in code both functions and module elements
   FunctionRefReplacer replacer(maybeReplace);
   replacer.run(runner, &module);
-  replacer.walkModuleCode(&module);
+  replacer.runOnModuleCode(runner, &module);
 
   // replace in start
   if (module.start.is()) {

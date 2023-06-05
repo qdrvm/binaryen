@@ -135,7 +135,7 @@ struct Flower : public CFGWalker<Flower, Visitor<Flower>, Info> {
       // Convert unordered_map to vector.
       flowBlock.lastSets.reserve(block->contents.lastSets.size());
       for (auto set : block->contents.lastSets) {
-        flowBlock.lastSets.emplace_back(std::make_pair(set.first, set.second));
+        flowBlock.lastSets.emplace_back(set);
       }
     }
     assert(entryFlowBlock != nullptr);
@@ -143,12 +143,12 @@ struct Flower : public CFGWalker<Flower, Visitor<Flower>, Info> {
     size_t currentIteration = 0;
     for (auto& block : flowBlocks) {
 #ifdef LOCAL_GRAPH_DEBUG
-      std::cout << "basic block " << block.get() << " :\n";
-      for (auto& action : block->contents.actions) {
+      std::cout << "basic block " << &block << " :\n";
+      for (auto& action : block.actions) {
         std::cout << "  action: " << *action << '\n';
       }
-      for (auto* lastSet : block->contents.lastSets) {
-        std::cout << "  last set " << lastSet << '\n';
+      for (auto& val : block.lastSets) {
+        std::cout << "  last set " << val.second << '\n';
       }
 #endif
       // go through the block, finding each get and adding it to its index,
@@ -232,9 +232,7 @@ LocalGraph::LocalGraph(Function* func) : func(func) {
 
 #ifdef LOCAL_GRAPH_DEBUG
   std::cout << "LocalGraph::dump\n";
-  for (auto& pair : getSetses) {
-    auto* get = pair.first;
-    auto& sets = pair.second;
+  for (auto& [get, sets] : getSetses) {
     std::cout << "GET\n" << get << " is influenced by\n";
     for (auto* set : sets) {
       std::cout << set << '\n';
@@ -282,8 +280,7 @@ bool LocalGraph::equivalent(LocalGet* a, LocalGet* b) {
 }
 
 void LocalGraph::computeSetInfluences() {
-  for (auto& pair : locations) {
-    auto* curr = pair.first;
+  for (auto& [curr, _] : locations) {
     if (auto* get = curr->dynCast<LocalGet>()) {
       for (auto* set : getSetses[get]) {
         setInfluences[set].insert(get);
@@ -293,8 +290,7 @@ void LocalGraph::computeSetInfluences() {
 }
 
 void LocalGraph::computeGetInfluences() {
-  for (auto& pair : locations) {
-    auto* curr = pair.first;
+  for (auto& [curr, _] : locations) {
     if (auto* set = curr->dynCast<LocalSet>()) {
       FindAll<LocalGet> findAll(set->value);
       for (auto* get : findAll.list) {
@@ -306,15 +302,12 @@ void LocalGraph::computeGetInfluences() {
 
 void LocalGraph::computeSSAIndexes() {
   std::unordered_map<Index, std::set<LocalSet*>> indexSets;
-  for (auto& pair : getSetses) {
-    auto* get = pair.first;
-    auto& sets = pair.second;
+  for (auto& [get, sets] : getSetses) {
     for (auto* set : sets) {
       indexSets[get->index].insert(set);
     }
   }
-  for (auto& pair : locations) {
-    auto* curr = pair.first;
+  for (auto& [curr, _] : locations) {
     if (auto* set = curr->dynCast<LocalSet>()) {
       auto& sets = indexSets[set->index];
       if (sets.size() == 1 && *sets.begin() != curr) {
@@ -324,9 +317,7 @@ void LocalGraph::computeSSAIndexes() {
       }
     }
   }
-  for (auto& pair : indexSets) {
-    auto index = pair.first;
-    auto& sets = pair.second;
+  for (auto& [index, sets] : indexSets) {
     if (sets.size() == 1) {
       SSAIndexes.insert(index);
     }

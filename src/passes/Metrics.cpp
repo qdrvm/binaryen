@@ -22,11 +22,9 @@
 #include <wasm-binary.h>
 #include <wasm.h>
 
-using namespace std;
-
 namespace wasm {
 
-typedef map<const char*, int> Counts;
+using Counts = std::map<const char*, int>;
 
 static Counts lastCounts;
 
@@ -55,32 +53,37 @@ struct Metrics
     }
     ModuleUtils::iterDefinedGlobals(*module,
                                     [&](Global* curr) { walkGlobal(curr); });
-    walkMemory(&module->memory);
 
-    // add imports / funcs / globals / exports / tables
+    // add imports / funcs / globals / exports / tables / memories
     counts["[imports]"] = imports.getNumImports();
     counts["[funcs]"] = imports.getNumDefinedFunctions();
     counts["[globals]"] = imports.getNumDefinedGlobals();
     counts["[tags]"] = imports.getNumDefinedTags();
     counts["[exports]"] = module->exports.size();
     counts["[tables]"] = imports.getNumDefinedTables();
-    // add memory and table
-    if (module->memory.exists) {
-      Index size = 0;
-      for (auto& segment : module->memory.segments) {
-        size += segment.data.size();
-      }
+    counts["[memories]"] = imports.getNumDefinedMemories();
+
+    // add memory
+    for (auto& memory : module->memories) {
+      walkMemory(memory.get());
+    }
+    Index size = 0;
+    for (auto& segment : module->dataSegments) {
+      walkDataSegment(segment.get());
+      size += segment->data.size();
+    }
+    if (!module->memories.empty()) {
       counts["[memory-data]"] = size;
     }
 
-    Index size = 0;
-    ModuleUtils::iterActiveElementSegments(
-      *module, [&](ElementSegment* segment) { size += segment->data.size(); });
+    // add table
+    size = 0;
     for (auto& table : module->tables) {
       walkTable(table.get());
     }
     for (auto& segment : module->elementSegments) {
       walkElementSegment(segment.get());
+      size += segment->data.size();
     }
     if (!module->tables.empty()) {
       counts["[table-data]"] = size;
@@ -101,7 +104,7 @@ struct Metrics
         counts["[vars]"] = func->getNumVars();
         counts["[binary-bytes]"] =
           writer.tableOfContents.functionBodies[binaryIndex++].size;
-        printCounts(std::string("func: ") + func->name.str);
+        printCounts(std::string("func: ") + func->name.toString());
       });
       // print for each export how much code size is due to it, i.e.,
       // how much the module could shrink without it.
@@ -131,8 +134,8 @@ struct Metrics
         counts.clear();
         counts["[removable-bytes-without-it]"] =
           baseline - sizeAfterGlobalCleanup(&test);
-        printCounts(std::string("export: ") + exp->name.str + " (" +
-                    exp->value.str + ')');
+        printCounts(std::string("export: ") + exp->name.toString() + " (" +
+                    exp->value.toString() + ')');
       }
       // check how much size depends on the start method
       if (!module->start.isNull()) {
@@ -142,7 +145,7 @@ struct Metrics
         counts.clear();
         counts["[removable-bytes-without-it]"] =
           baseline - sizeAfterGlobalCleanup(&test);
-        printCounts(std::string("start: ") + module->start.str);
+        printCounts(std::string("start: ") + module->start.toString());
       }
       // can't compare detailed info between passes yet
       lastCounts.clear();
@@ -162,15 +165,21 @@ struct Metrics
   }
 
   void printCounts(std::string title) {
-    ostream& o = cout;
-    vector<const char*> keys;
+    using std::left;
+    using std::noshowpos;
+    using std::right;
+    using std::setw;
+    using std::showpos;
+
+    std::ostream& o = std::cout;
+    std::vector<const char*> keys;
     // add total
     int total = 0;
-    for (auto i : counts) {
-      keys.push_back(i.first);
+    for (auto& [key, value] : counts) {
+      keys.push_back(key);
       // total is of all the normal stuff, not the special [things]
-      if (i.first[0] != '[') {
-        total += i.second;
+      if (key[0] != '[') {
+        total += value;
       }
     }
     keys.push_back("[total]");

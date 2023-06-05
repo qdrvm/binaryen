@@ -28,7 +28,9 @@ namespace wasm {
 struct PickLoadSigns : public WalkerPass<ExpressionStackWalker<PickLoadSigns>> {
   bool isFunctionParallel() override { return true; }
 
-  Pass* create() override { return new PickLoadSigns; }
+  std::unique_ptr<Pass> create() override {
+    return std::make_unique<PickLoadSigns>();
+  }
 
   struct Usage {
     Index signedUsages = 0;
@@ -93,9 +95,7 @@ struct PickLoadSigns : public WalkerPass<ExpressionStackWalker<PickLoadSigns>> {
 
   void optimize() {
     // optimize based on the info we saw
-    for (auto& pair : loads) {
-      auto* load = pair.first;
-      auto index = pair.second;
+    for (auto& [load, index] : loads) {
       auto& usage = usages[index];
       // if we can't optimize, give up
       if (usage.totalUsages == 0 || // no usages, so no idea

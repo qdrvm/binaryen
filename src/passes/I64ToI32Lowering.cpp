@@ -22,13 +22,13 @@
 //
 
 #include "abi/js.h"
-#include "emscripten-optimizer/istring.h"
 #include "ir/flat.h"
 #include "ir/iteration.h"
 #include "ir/memory-utils.h"
 #include "ir/module-utils.h"
 #include "ir/names.h"
 #include "pass.h"
+#include "support/istring.h"
 #include "support/name.h"
 #include "wasm-builder.h"
 #include "wasm.h"
@@ -36,7 +36,7 @@
 
 namespace wasm {
 
-static Name makeHighName(Name n) { return std::string(n.c_str()) + "$hi"; }
+static Name makeHighName(Name n) { return n.toString() + "$hi"; }
 
 struct I64ToI32Lowering : public WalkerPass<PostWalker<I64ToI32Lowering>> {
   struct TempVar {
@@ -99,11 +99,13 @@ struct I64ToI32Lowering : public WalkerPass<PostWalker<I64ToI32Lowering>> {
   // TODO: allow module-level transformations in parallel passes
   bool isFunctionParallel() override { return false; }
 
-  Pass* create() override { return new I64ToI32Lowering; }
+  std::unique_ptr<Pass> create() override {
+    return std::make_unique<I64ToI32Lowering>();
+  }
 
   void doWalkModule(Module* module) {
     if (!builder) {
-      builder = make_unique<Builder>(*module);
+      builder = std::make_unique<Builder>(*module);
     }
     // add new globals for high bits
     for (size_t i = 0, globals = module->globals.size(); i < globals; ++i) {
@@ -116,7 +118,8 @@ struct I64ToI32Lowering : public WalkerPass<PostWalker<I64ToI32Lowering>> {
       auto high = builder->makeGlobal(makeHighName(curr->name),
                                       Type::i32,
                                       builder->makeConst(int32_t(0)),
-                                      Builder::Mutable);
+                                      curr->mutable_ ? Builder::Mutable
+                                                     : Builder::Immutable);
       if (curr->imported()) {
         Fatal() << "TODO: imported i64 globals";
       } else {
@@ -151,7 +154,7 @@ struct I64ToI32Lowering : public WalkerPass<PostWalker<I64ToI32Lowering>> {
     Flat::verifyFlatness(func);
     // create builder here if this is first entry to module for this object
     if (!builder) {
-      builder = make_unique<Builder>(*getModule());
+      builder = std::make_unique<Builder>(*getModule());
     }
     indexMap.clear();
     highBitVars.clear();
@@ -261,20 +264,21 @@ struct I64ToI32Lowering : public WalkerPass<PostWalker<I64ToI32Lowering>> {
     // If this was to an import, we need to call the legal version. This assumes
     // that legalize-js-interface has been run before.
     if (fixedCall && getModule()->getFunction(fixedCall->target)->imported()) {
-      fixedCall->target = std::string("legalfunc$") + fixedCall->target.str;
+      fixedCall->target =
+        std::string("legalfunc$") + fixedCall->target.toString();
       return;
     }
   }
 
   void visitCallIndirect(CallIndirect* curr) {
-    if (curr->isReturn && curr->sig.results == Type::i64) {
+    if (curr->isReturn && curr->heapType.getSignature().results == Type::i64) {
       Fatal()
         << "i64 to i32 lowering of return_call values not yet implemented";
     }
     visitGenericCall<CallIndirect>(
       curr, [&](std::vector<Expression*>& args, Type results) {
         std::vector<Type> params;
-        for (const auto& param : curr->sig.params) {
+        for (const auto& param : curr->heapType.getSignature().params) {
           if (param == Type::i64) {
             params.push_back(Type::i32);
             params.push_back(Type::i32);
@@ -386,7 +390,8 @@ struct I64ToI32Lowering : public WalkerPass<PostWalker<I64ToI32Lowering>> {
                           curr->offset + 4,
                           std::min(uint32_t(curr->align), uint32_t(4)),
                           builder->makeLocalGet(ptrTemp, Type::i32),
-                          Type::i32));
+                          Type::i32,
+                          curr->memory));
     } else if (curr->signed_) {
       loadHigh = builder->makeLocalSet(
         highBits,
@@ -432,7 +437,8 @@ struct I64ToI32Lowering : public WalkerPass<PostWalker<I64ToI32Lowering>> {
                            std::min(uint32_t(curr->align), uint32_t(4)),
                            builder->makeLocalGet(ptrTemp, Type::i32),
                            builder->makeLocalGet(highBits, Type::i32),
-                           Type::i32);
+                           Type::i32,
+                           curr->memory);
       replaceCurrent(builder->blockify(setPtr, curr, storeHigh));
     }
   }
@@ -473,10 +479,10 @@ struct I64ToI32Lowering : public WalkerPass<PostWalker<I64ToI32Lowering>> {
 
   void visitAtomicWait(AtomicWait* curr) {
     // The last parameter is an i64, so we cannot leave it as it is
-    assert(curr->offset == 0);
     replaceCurrent(builder->makeCall(
       ABI::wasm2js::ATOMIC_WAIT_I32,
-      {curr->ptr,
+      {builder->makeConst(int32_t(curr->offset)),
+       curr->ptr,
        curr->expected,
        curr->timeout,
        builder->makeLocalGet(fetchOutParam(curr->timeout), Type::i32)},
@@ -539,6 +545,39 @@ struct I64ToI32Lowering : public WalkerPass<PostWalker<I64ToI32Lowering>> {
     replaceCurrent(result);
   }
 
+  void lowerExtendSInt64(Unary* curr) {
+    TempVar highBits = getTemp();
+    TempVar lowBits = getTemp();
+
+    // free the temp var
+    fetchOutParam(curr->value);
+
+    Expression* lowValue = curr->value;
+    switch (curr->op) {
+      case ExtendS8Int64:
+        lowValue = builder->makeUnary(ExtendS8Int32, lowValue);
+        break;
+      case ExtendS16Int64:
+        lowValue = builder->makeUnary(ExtendS16Int32, lowValue);
+        break;
+      default:
+        break;
+    }
+
+    LocalSet* setLow = builder->makeLocalSet(lowBits, lowValue);
+    LocalSet* setHigh = builder->makeLocalSet(
+      highBits,
+      builder->makeBinary(ShrSInt32,
+                          builder->makeLocalGet(lowBits, Type::i32),
+                          builder->makeConst(int32_t(31))));
+
+    Block* result = builder->blockify(
+      setLow, setHigh, builder->makeLocalGet(lowBits, Type::i32));
+
+    setOutParam(result, std::move(highBits));
+    replaceCurrent(result);
+  }
+
   void lowerWrapInt64(Unary* curr) {
     // free the temp var
     fetchOutParam(curr->value);
@@ -561,7 +600,7 @@ struct I64ToI32Lowering : public WalkerPass<PostWalker<I64ToI32Lowering>> {
                         Type::i32));
     setOutParam(result, std::move(highBits));
     replaceCurrent(result);
-    MemoryUtils::ensureExists(getModule()->memory);
+    MemoryUtils::ensureExists(getModule());
     ABI::wasm2js::ensureHelpers(getModule());
   }
 
@@ -579,7 +618,7 @@ struct I64ToI32Lowering : public WalkerPass<PostWalker<I64ToI32Lowering>> {
                         Type::none),
       builder->makeCall(ABI::wasm2js::SCRATCH_LOAD_F64, {}, Type::f64));
     replaceCurrent(result);
-    MemoryUtils::ensureExists(getModule()->memory);
+    MemoryUtils::ensureExists(getModule());
     ABI::wasm2js::ensureHelpers(getModule());
   }
 
@@ -845,6 +884,9 @@ struct I64ToI32Lowering : public WalkerPass<PostWalker<I64ToI32Lowering>> {
       case ConvertUInt64ToFloat32:
       case ConvertUInt64ToFloat64:
       case ReinterpretInt64:
+      case ExtendS8Int64:
+      case ExtendS16Int64:
+      case ExtendS32Int64:
         return true;
       default:
         return false;
@@ -894,6 +936,11 @@ struct I64ToI32Lowering : public WalkerPass<PostWalker<I64ToI32Lowering>> {
       case ConvertUInt64ToFloat32:
       case ConvertUInt64ToFloat64:
         lowerConvertIntToFloat(curr);
+        break;
+      case ExtendS8Int64:
+      case ExtendS16Int64:
+      case ExtendS32Int64:
+        lowerExtendSInt64(curr);
         break;
       case PopcntInt64:
         WASM_UNREACHABLE("i64.popcnt should already be removed");

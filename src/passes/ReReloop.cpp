@@ -36,7 +36,9 @@ namespace wasm {
 struct ReReloop final : public Pass {
   bool isFunctionParallel() override { return true; }
 
-  Pass* create() override { return new ReReloop; }
+  std::unique_ptr<Pass> create() override {
+    return std::make_unique<ReReloop>();
+  }
 
   std::unique_ptr<CFG::Relooper> relooper;
   std::unique_ptr<Builder> builder;
@@ -100,7 +102,7 @@ struct ReReloop final : public Pass {
     virtual void run() { WASM_UNREACHABLE("unimpl"); }
   };
 
-  typedef std::shared_ptr<Task> TaskPtr;
+  using TaskPtr = std::shared_ptr<Task>;
   std::vector<TaskPtr> stack;
 
   struct TriageTask final : public Task {
@@ -228,9 +230,8 @@ struct ReReloop final : public Pass {
       for (Index i = 0; i < num; i++) {
         targetValues[targets[i]].insert(i);
       }
-      for (auto& iter : targetValues) {
-        parent.addSwitchBranch(
-          before, parent.getBreakTarget(iter.first), iter.second);
+      for (auto& [name, indices] : targetValues) {
+        parent.addSwitchBranch(before, parent.getBreakTarget(name), indices);
       }
       // the default may be among the targets, in which case, we can't add it
       // simply as it would be a duplicate, so create a temp block
@@ -292,16 +293,14 @@ struct ReReloop final : public Pass {
     // TODO: optimize with this?
   }
 
-  void runOnFunction(PassRunner* runner,
-                     Module* module,
-                     Function* function) override {
+  void runOnFunction(Module* module, Function* function) override {
     Flat::verifyFlatness(function);
 
     // since control flow is flattened, this is pretty simple
     // first, traverse the function body. note how we don't need to traverse
     // into expressions, as we know they contain no control flow
-    builder = make_unique<Builder>(*module);
-    relooper = make_unique<CFG::Relooper>(module);
+    builder = std::make_unique<Builder>(*module);
+    relooper = std::make_unique<CFG::Relooper>(module);
     auto* entry = startCFGBlock();
     stack.push_back(TaskPtr(new TriageTask(*this, function->body)));
     // main loop
@@ -328,9 +327,7 @@ struct ReReloop final : public Pass {
     std::cout << "rerelooping " << function->name << '\n';
     for (auto* block : relooper->Blocks) {
       std::cout << block << " block:\n" << block->Code << '\n';
-      for (auto& pair : block->BranchesOut) {
-        auto* target = pair.first;
-        auto* branch = pair.second;
+      for (auto& [target, branch] : block->BranchesOut) {
         std::cout << "branch to " << target << "\n";
         if (branch->Condition) {
           std::cout << "  with condition\n" << branch->Condition << '\n';

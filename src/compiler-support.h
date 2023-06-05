@@ -31,22 +31,4 @@
 #define WASM_BUILTIN_UNREACHABLE __assume(false)
 #endif
 
-#ifdef __GNUC__
-#define WASM_NORETURN __attribute__((noreturn))
-#elif defined(_MSC_VER)
-#define WASM_NORETURN __declspec(noreturn)
-#else
-#define WASM_NORETURN
-#endif
-
-// The code might contain TODOs or stubs that read some values but do nothing
-// with them. The compiler might fail with [-Werror,-Wunused-variable].
-// The WASM_UNUSED(varible) is a wrapper that helps to suppress the error.
-#define WASM_UNUSED(expr)                                                      \
-  do {                                                                         \
-    if (sizeof expr) {                                                         \
-      (void)0;                                                                 \
-    }                                                                          \
-  } while (0)
-
 #endif // wasm_compiler_support_h

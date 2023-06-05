@@ -7,7 +7,7 @@
   ;; CHECK:      (tag $e2 (param))
   (tag $e2)
 
-  ;; CHECK:      (func $try1
+  ;; CHECK:      (func $try1 (type $none_=>_none)
   ;; CHECK-NEXT:  (local $x i32)
   ;; CHECK-NEXT:  (try $try
   ;; CHECK-NEXT:   (do
@@ -35,7 +35,7 @@
     (local.set $x (i32.const 1))
   )
 
-  ;; CHECK:      (func $try2
+  ;; CHECK:      (func $try2 (type $none_=>_none)
   ;; CHECK-NEXT:  (local $x i32)
   ;; CHECK-NEXT:  (try $try
   ;; CHECK-NEXT:   (do
@@ -68,7 +68,7 @@
     (local.set $x (i32.const 1))
   )
 
-  ;; CHECK:      (func $try3
+  ;; CHECK:      (func $try3 (type $none_=>_none)
   ;; CHECK-NEXT:  (local $x i32)
   ;; CHECK-NEXT:  (try $try
   ;; CHECK-NEXT:   (do
@@ -101,12 +101,12 @@
     (local.set $x (i32.const 1))
   )
 
-  ;; CHECK:      (func $foo
+  ;; CHECK:      (func $foo (type $none_=>_none)
   ;; CHECK-NEXT:  (nop)
   ;; CHECK-NEXT: )
   (func $foo)
 
-  ;; CHECK:      (func $try4
+  ;; CHECK:      (func $try4 (type $none_=>_none)
   ;; CHECK-NEXT:  (local $x i32)
   ;; CHECK-NEXT:  (try $try
   ;; CHECK-NEXT:   (do
@@ -137,7 +137,7 @@
     (local.set $x (i32.const 1))
   )
 
-  ;; CHECK:      (func $try5
+  ;; CHECK:      (func $try5 (type $none_=>_none)
   ;; CHECK-NEXT:  (local $x i32)
   ;; CHECK-NEXT:  (try $try
   ;; CHECK-NEXT:   (do
@@ -168,7 +168,7 @@
     (local.set $x (i32.const 1))
   )
 
-  ;; CHECK:      (func $nested-try1
+  ;; CHECK:      (func $nested-try1 (type $none_=>_none)
   ;; CHECK-NEXT:  (local $x i32)
   ;; CHECK-NEXT:  (try $try
   ;; CHECK-NEXT:   (do
@@ -216,7 +216,7 @@
     (local.set $x (i32.const 1))
   )
 
-  ;; CHECK:      (func $nested-try2
+  ;; CHECK:      (func $nested-try2 (type $none_=>_none)
   ;; CHECK-NEXT:  (local $x i32)
   ;; CHECK-NEXT:  (try $try
   ;; CHECK-NEXT:   (do
@@ -263,7 +263,7 @@
     (local.set $x (i32.const 1))
   )
 
-  ;; CHECK:      (func $nested-try3
+  ;; CHECK:      (func $nested-try3 (type $none_=>_none)
   ;; CHECK-NEXT:  (local $x i32)
   ;; CHECK-NEXT:  (try $try
   ;; CHECK-NEXT:   (do
@@ -314,7 +314,7 @@
     (local.set $x (i32.const 1))
   )
 
-  ;; CHECK:      (func $nested-catch1
+  ;; CHECK:      (func $nested-catch1 (type $none_=>_none)
   ;; CHECK-NEXT:  (local $x i32)
   ;; CHECK-NEXT:  (try $try
   ;; CHECK-NEXT:   (do
@@ -380,7 +380,7 @@
     (local.set $x (i32.const 1))
   )
 
-  ;; CHECK:      (func $nested-catch2
+  ;; CHECK:      (func $nested-catch2 (type $none_=>_none)
   ;; CHECK-NEXT:  (local $x i32)
   ;; CHECK-NEXT:  (try $try
   ;; CHECK-NEXT:   (do
@@ -450,6 +450,364 @@
     )
     ;; This should be dropped because the exception is guaranteed to be caught
     ;; by one of the catches and it will set the local to 1.
+    (local.set $x (i32.const 1))
+  )
+
+  ;; CHECK:      (func $catchless-try (type $none_=>_none)
+  ;; CHECK-NEXT:  (local $x i32)
+  ;; CHECK-NEXT:  (try $try
+  ;; CHECK-NEXT:   (do
+  ;; CHECK-NEXT:    (call $foo)
+  ;; CHECK-NEXT:    (local.set $x
+  ;; CHECK-NEXT:     (i32.const 1)
+  ;; CHECK-NEXT:    )
+  ;; CHECK-NEXT:   )
+  ;; CHECK-NEXT:  )
+  ;; CHECK-NEXT:  (drop
+  ;; CHECK-NEXT:   (i32.const 1)
+  ;; CHECK-NEXT:  )
+  ;; CHECK-NEXT: )
+  (func $catchless-try
+    (local $x i32)
+    (try
+      (do
+        (call $foo)
+        (local.set $x (i32.const 1))
+      )
+    )
+    ;; The only way we end up here is when (call $foo) does not throw, because
+    ;; if (call $foo) throws, it will throw to the caller because it is within
+    ;; a catchless try. In that case the local.set after (call $foo) would have
+    ;; run before this, so this can be dropped.
+    (local.set $x (i32.const 1))
+  )
+
+  ;; CHECK:      (func $try-delegate0 (type $none_=>_none)
+  ;; CHECK-NEXT:  (local $x i32)
+  ;; CHECK-NEXT:  (try $l0
+  ;; CHECK-NEXT:   (do
+  ;; CHECK-NEXT:    (try $try
+  ;; CHECK-NEXT:     (do
+  ;; CHECK-NEXT:      (try $try2
+  ;; CHECK-NEXT:       (do
+  ;; CHECK-NEXT:        (throw $e
+  ;; CHECK-NEXT:         (i32.const 0)
+  ;; CHECK-NEXT:        )
+  ;; CHECK-NEXT:       )
+  ;; CHECK-NEXT:       (delegate $l0)
+  ;; CHECK-NEXT:      )
+  ;; CHECK-NEXT:     )
+  ;; CHECK-NEXT:     (catch_all
+  ;; CHECK-NEXT:      (nop)
+  ;; CHECK-NEXT:     )
+  ;; CHECK-NEXT:    )
+  ;; CHECK-NEXT:   )
+  ;; CHECK-NEXT:   (catch_all
+  ;; CHECK-NEXT:    (local.set $x
+  ;; CHECK-NEXT:     (i32.const 1)
+  ;; CHECK-NEXT:    )
+  ;; CHECK-NEXT:   )
+  ;; CHECK-NEXT:  )
+  ;; CHECK-NEXT:  (drop
+  ;; CHECK-NEXT:   (i32.const 1)
+  ;; CHECK-NEXT:  )
+  ;; CHECK-NEXT: )
+  (func $try-delegate0
+    (local $x i32)
+    (try $l0
+      (do
+        (try
+          (do
+            (try
+              (do
+                (throw $e (i32.const 0))
+              )
+              (delegate $l0)
+            )
+          )
+          (catch_all)
+        )
+      )
+      (catch_all
+        (local.set $x (i32.const 1))
+      )
+    )
+    ;; The innermost try has a delegate, which delegates to the outermost try's
+    ;; catch_all, which has the same local.set. So this can be dropped.
+    (local.set $x (i32.const 1))
+  )
+
+  ;; CHECK:      (func $try-delegate1 (type $none_=>_none)
+  ;; CHECK-NEXT:  (local $x i32)
+  ;; CHECK-NEXT:  (try $l0
+  ;; CHECK-NEXT:   (do
+  ;; CHECK-NEXT:    (try $try
+  ;; CHECK-NEXT:     (do
+  ;; CHECK-NEXT:      (try $try3
+  ;; CHECK-NEXT:       (do
+  ;; CHECK-NEXT:        (throw $e
+  ;; CHECK-NEXT:         (i32.const 0)
+  ;; CHECK-NEXT:        )
+  ;; CHECK-NEXT:       )
+  ;; CHECK-NEXT:       (delegate $l0)
+  ;; CHECK-NEXT:      )
+  ;; CHECK-NEXT:     )
+  ;; CHECK-NEXT:     (catch_all
+  ;; CHECK-NEXT:      (local.set $x
+  ;; CHECK-NEXT:       (i32.const 1)
+  ;; CHECK-NEXT:      )
+  ;; CHECK-NEXT:     )
+  ;; CHECK-NEXT:    )
+  ;; CHECK-NEXT:   )
+  ;; CHECK-NEXT:   (catch_all
+  ;; CHECK-NEXT:    (nop)
+  ;; CHECK-NEXT:   )
+  ;; CHECK-NEXT:  )
+  ;; CHECK-NEXT:  (local.set $x
+  ;; CHECK-NEXT:   (i32.const 1)
+  ;; CHECK-NEXT:  )
+  ;; CHECK-NEXT: )
+  (func $try-delegate1
+    (local $x i32)
+    (try $l0
+      (do
+        (try
+          (do
+            (try
+              (do
+                (throw $e (i32.const 0))
+              )
+              (delegate $l0)
+            )
+          )
+          (catch_all
+            (local.set $x (i32.const 1))
+          )
+        )
+      )
+      (catch_all)
+    )
+    ;; The middle try's catch_all has the same local.set, but it is skipped
+    ;; because the innermost try-delegate delegates to the outer try while
+    ;; skipping the middle try-catch_all. So this should NOT be dropped.
+    (local.set $x (i32.const 1))
+  )
+
+  ;; CHECK:      (func $try-delegate2 (type $none_=>_none)
+  ;; CHECK-NEXT:  (local $x i32)
+  ;; CHECK-NEXT:  (try $l0
+  ;; CHECK-NEXT:   (do
+  ;; CHECK-NEXT:    (try $try
+  ;; CHECK-NEXT:     (do
+  ;; CHECK-NEXT:      (try $try4
+  ;; CHECK-NEXT:       (do
+  ;; CHECK-NEXT:        (throw $e
+  ;; CHECK-NEXT:         (i32.const 0)
+  ;; CHECK-NEXT:        )
+  ;; CHECK-NEXT:       )
+  ;; CHECK-NEXT:       (delegate 2)
+  ;; CHECK-NEXT:      )
+  ;; CHECK-NEXT:     )
+  ;; CHECK-NEXT:     (catch_all
+  ;; CHECK-NEXT:      (local.set $x
+  ;; CHECK-NEXT:       (i32.const 1)
+  ;; CHECK-NEXT:      )
+  ;; CHECK-NEXT:     )
+  ;; CHECK-NEXT:    )
+  ;; CHECK-NEXT:   )
+  ;; CHECK-NEXT:   (catch_all
+  ;; CHECK-NEXT:    (local.set $x
+  ;; CHECK-NEXT:     (i32.const 1)
+  ;; CHECK-NEXT:    )
+  ;; CHECK-NEXT:   )
+  ;; CHECK-NEXT:  )
+  ;; CHECK-NEXT:  (local.set $x
+  ;; CHECK-NEXT:   (i32.const 1)
+  ;; CHECK-NEXT:  )
+  ;; CHECK-NEXT: )
+  (func $try-delegate2
+    (local $x i32)
+    (try $l0
+      (do
+        (try
+          (do
+            (try
+              (do
+                (throw $e (i32.const 0))
+              )
+              (delegate 2) ;; delegate to caller
+            )
+          )
+          (catch_all
+            (local.set $x (i32.const 1))
+          )
+        )
+      )
+      (catch_all
+        (local.set $x (i32.const 1))
+      )
+    )
+    ;; The innermost try-delegate delegates to the caller, bypassing all
+    ;; local.sets in the middle and the outermost try-catch_alls. So this should
+    ;; NOT be dropped. (Instead this is unreachable, but that's DCE's work)
+    (local.set $x (i32.const 1))
+  )
+
+  ;; CHECK:      (func $try-delegate3 (type $none_=>_none)
+  ;; CHECK-NEXT:  (local $x i32)
+  ;; CHECK-NEXT:  (try $l0
+  ;; CHECK-NEXT:   (do
+  ;; CHECK-NEXT:    (try $try
+  ;; CHECK-NEXT:     (do
+  ;; CHECK-NEXT:      (try $l1
+  ;; CHECK-NEXT:       (do
+  ;; CHECK-NEXT:        (try $try5
+  ;; CHECK-NEXT:         (do
+  ;; CHECK-NEXT:          (try $try6
+  ;; CHECK-NEXT:           (do
+  ;; CHECK-NEXT:            (throw $e
+  ;; CHECK-NEXT:             (i32.const 0)
+  ;; CHECK-NEXT:            )
+  ;; CHECK-NEXT:           )
+  ;; CHECK-NEXT:           (delegate $l1)
+  ;; CHECK-NEXT:          )
+  ;; CHECK-NEXT:         )
+  ;; CHECK-NEXT:         (catch_all
+  ;; CHECK-NEXT:          (local.set $x
+  ;; CHECK-NEXT:           (i32.const 1)
+  ;; CHECK-NEXT:          )
+  ;; CHECK-NEXT:         )
+  ;; CHECK-NEXT:        )
+  ;; CHECK-NEXT:       )
+  ;; CHECK-NEXT:       (delegate $l0)
+  ;; CHECK-NEXT:      )
+  ;; CHECK-NEXT:     )
+  ;; CHECK-NEXT:     (catch_all
+  ;; CHECK-NEXT:      (local.set $x
+  ;; CHECK-NEXT:       (i32.const 1)
+  ;; CHECK-NEXT:      )
+  ;; CHECK-NEXT:     )
+  ;; CHECK-NEXT:    )
+  ;; CHECK-NEXT:   )
+  ;; CHECK-NEXT:   (catch_all
+  ;; CHECK-NEXT:    (nop)
+  ;; CHECK-NEXT:   )
+  ;; CHECK-NEXT:  )
+  ;; CHECK-NEXT:  (local.set $x
+  ;; CHECK-NEXT:   (i32.const 1)
+  ;; CHECK-NEXT:  )
+  ;; CHECK-NEXT: )
+  (func $try-delegate3
+    (local $x i32)
+    (try $l0
+      (do
+        (try
+          (do
+            (try $l1
+              (do
+                (try
+                  (do
+                    (try
+                      (do
+                        (throw $e (i32.const 0))
+                      )
+                      (delegate $l1)
+                    )
+                  )
+                  (catch_all
+                    (local.set $x (i32.const 1))
+                  )
+                )
+              )
+              (delegate $l0)
+            )
+          )
+          (catch_all
+            (local.set $x (i32.const 1))
+          )
+        )
+      )
+      (catch_all)
+    )
+    ;; The innermost try delegates to $l1, which in turn delegates to $l0,
+    ;; skipping all local.sets in between. So this should NOT be dropped.
+    (local.set $x (i32.const 1))
+  )
+
+  ;; CHECK:      (func $try-delegate4 (type $none_=>_none)
+  ;; CHECK-NEXT:  (local $x i32)
+  ;; CHECK-NEXT:  (try $l0
+  ;; CHECK-NEXT:   (do
+  ;; CHECK-NEXT:    (try $try
+  ;; CHECK-NEXT:     (do
+  ;; CHECK-NEXT:      (try $l1
+  ;; CHECK-NEXT:       (do
+  ;; CHECK-NEXT:        (try $try7
+  ;; CHECK-NEXT:         (do
+  ;; CHECK-NEXT:          (try $try8
+  ;; CHECK-NEXT:           (do
+  ;; CHECK-NEXT:            (throw $e
+  ;; CHECK-NEXT:             (i32.const 0)
+  ;; CHECK-NEXT:            )
+  ;; CHECK-NEXT:           )
+  ;; CHECK-NEXT:           (delegate $l1)
+  ;; CHECK-NEXT:          )
+  ;; CHECK-NEXT:         )
+  ;; CHECK-NEXT:         (catch_all
+  ;; CHECK-NEXT:          (nop)
+  ;; CHECK-NEXT:         )
+  ;; CHECK-NEXT:        )
+  ;; CHECK-NEXT:       )
+  ;; CHECK-NEXT:       (delegate $l0)
+  ;; CHECK-NEXT:      )
+  ;; CHECK-NEXT:     )
+  ;; CHECK-NEXT:     (catch_all
+  ;; CHECK-NEXT:      (nop)
+  ;; CHECK-NEXT:     )
+  ;; CHECK-NEXT:    )
+  ;; CHECK-NEXT:   )
+  ;; CHECK-NEXT:   (catch_all
+  ;; CHECK-NEXT:    (local.set $x
+  ;; CHECK-NEXT:     (i32.const 1)
+  ;; CHECK-NEXT:    )
+  ;; CHECK-NEXT:   )
+  ;; CHECK-NEXT:  )
+  ;; CHECK-NEXT:  (drop
+  ;; CHECK-NEXT:   (i32.const 1)
+  ;; CHECK-NEXT:  )
+  ;; CHECK-NEXT: )
+  (func $try-delegate4
+    (local $x i32)
+    (try $l0
+      (do
+        (try
+          (do
+            (try $l1
+              (do
+                (try
+                  (do
+                    (try
+                      (do
+                        (throw $e (i32.const 0))
+                      )
+                      (delegate $l1)
+                    )
+                  )
+                  (catch_all)
+                )
+              )
+              (delegate $l0)
+            )
+          )
+          (catch_all)
+        )
+      )
+      (catch_all
+        (local.set $x (i32.const 1))
+      )
+    )
+    ;; The innermost try delegates to $l1, which in turn delgates to $l0, whose
+    ;; catch_all runs the same local.set. So this can be dropped.
     (local.set $x (i32.const 1))
   )
 )

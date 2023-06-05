@@ -11,14 +11,16 @@
     (try $label
       (do)
       (catch $tag$0
-        (nop)
+        (drop
+          (pop i32)
+        )
       )
     )
   )
 
   ;; Properly ensure unique try labels after an inlining
 
-  ;; CHECK:      (func $caller-with-label (param $x i32)
+  ;; CHECK:      (func $caller-with-label (type $i32_=>_none) (param $x i32)
   ;; CHECK-NEXT:  (loop $label
   ;; CHECK-NEXT:   (block
   ;; CHECK-NEXT:    (block $__inlined_func$callee-with-label
@@ -27,7 +29,9 @@
   ;; CHECK-NEXT:       (nop)
   ;; CHECK-NEXT:      )
   ;; CHECK-NEXT:      (catch $tag$0
-  ;; CHECK-NEXT:       (nop)
+  ;; CHECK-NEXT:       (drop
+  ;; CHECK-NEXT:        (pop i32)
+  ;; CHECK-NEXT:       )
   ;; CHECK-NEXT:      )
   ;; CHECK-NEXT:     )
   ;; CHECK-NEXT:    )
@@ -47,7 +51,7 @@
   )
 
   ;; ---------------------------------------------------------------------------
-  ;; CHECK:      (func $callee-with-try-delegate
+  ;; CHECK:      (func $callee-with-try-delegate (type $none_=>_none)
   ;; CHECK-NEXT:  (try $label$3
   ;; CHECK-NEXT:   (do
   ;; CHECK-NEXT:    (nop)
@@ -64,7 +68,7 @@
 
   ;; For now, do not inline a try-delegate
 
-  ;; CHECK:      (func $caller
+  ;; CHECK:      (func $caller (type $none_=>_none)
   ;; CHECK-NEXT:  (call $callee-with-try-delegate)
   ;; CHECK-NEXT: )
   (func $caller
@@ -72,13 +76,13 @@
   )
 
   ;; ---------------------------------------------------------------------------
-  (func $callee (result i32)
+  (func $callee-a (result i32)
     (i32.const 42)
   )
 
   ;; Properly support inlining into a function with a try-delegate
 
-  ;; CHECK:      (func $caller-with-try-delegate (result i32)
+  ;; CHECK:      (func $caller-with-try-delegate (type $none_=>_i32) (result i32)
   ;; CHECK-NEXT:  (try $label$3
   ;; CHECK-NEXT:   (do
   ;; CHECK-NEXT:    (nop)
@@ -86,7 +90,7 @@
   ;; CHECK-NEXT:   (delegate 0)
   ;; CHECK-NEXT:  )
   ;; CHECK-NEXT:  (block (result i32)
-  ;; CHECK-NEXT:   (block $__inlined_func$callee (result i32)
+  ;; CHECK-NEXT:   (block $__inlined_func$callee-a$1 (result i32)
   ;; CHECK-NEXT:    (i32.const 42)
   ;; CHECK-NEXT:   )
   ;; CHECK-NEXT:  )
@@ -96,6 +100,47 @@
       (do)
       (delegate 0)
     )
-    (call $callee)
+    (call $callee-a)
+  )
+
+
+  ;; ---------------------------------------------------------------------------
+  (func $callee-b (param i32))
+
+  ;; CHECK:      (func $caller-with-pop (type $none_=>_none)
+  ;; CHECK-NEXT:  (local $0 i32)
+  ;; CHECK-NEXT:  (local $1 i32)
+  ;; CHECK-NEXT:  (try $try
+  ;; CHECK-NEXT:   (do
+  ;; CHECK-NEXT:    (nop)
+  ;; CHECK-NEXT:   )
+  ;; CHECK-NEXT:   (catch $tag$0
+  ;; CHECK-NEXT:    (local.set $1
+  ;; CHECK-NEXT:     (pop i32)
+  ;; CHECK-NEXT:    )
+  ;; CHECK-NEXT:    (block
+  ;; CHECK-NEXT:     (block $__inlined_func$callee-b$2
+  ;; CHECK-NEXT:      (local.set $0
+  ;; CHECK-NEXT:       (local.get $1)
+  ;; CHECK-NEXT:      )
+  ;; CHECK-NEXT:      (nop)
+  ;; CHECK-NEXT:     )
+  ;; CHECK-NEXT:    )
+  ;; CHECK-NEXT:   )
+  ;; CHECK-NEXT:  )
+  ;; CHECK-NEXT: )
+  (func $caller-with-pop
+    (try
+      (do)
+      (catch $tag$0
+        ;; After this $callee-b is inlined, there will be additional 'block's
+        ;; surrouding this 'pop', which makes its location invalid. We fix it by
+        ;; creating a new local to set the result of 'pop' and later use
+        ;; local.get to get the value within the inlined function body.
+        (call $callee-b
+          (pop i32)
+        )
+      )
+    )
   )
 )

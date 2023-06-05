@@ -37,12 +37,12 @@
 #include <unordered_set>
 #include <vector>
 
-#include "emscripten-optimizer/istring.h"
+#include "support/istring.h"
 #include "support/safe_integer.h"
 
 namespace json {
 
-typedef cashew::IString IString;
+using IString = wasm::IString;
 
 // Main value type
 struct Value {
@@ -65,8 +65,8 @@ struct Value {
 
   Type type = Null;
 
-  typedef std::vector<Ref> ArrayStorage;
-  typedef std::unordered_map<IString, Ref> ObjectStorage;
+  using ArrayStorage = std::vector<Ref>;
+  using ObjectStorage = std::unordered_map<IString, Ref>;
 
   // MSVC does not allow unrestricted unions:
   // http://www.open-std.org/jtc1/sc22/wg21/docs/papers/2008/n2544.pdf
@@ -112,13 +112,13 @@ struct Value {
   Value& setString(const char* s) {
     free();
     type = String;
-    str.set(s);
+    str = s;
     return *this;
   }
   Value& setString(const IString& s) {
     free();
     type = String;
-    str.set(s);
+    str = s;
     return *this;
   }
   Value& setNumber(double n) {
@@ -173,7 +173,7 @@ struct Value {
 
   const char* getCString() {
     assert(isString());
-    return str.str;
+    return str.str.data();
   }
   IString& getIString() {
     assert(isString());
@@ -403,7 +403,7 @@ struct Value {
   }
 };
 
-typedef Value::Ref Ref;
+using Ref = Value::Ref;
 
 } // namespace json
 

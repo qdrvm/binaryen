@@ -20,13 +20,13 @@
 #include <algorithm>
 #include <vector>
 
+#include "ir/iteration.h"
 #include "ir/module-utils.h"
 #include "literal.h"
 #include "wasm.h"
 
-namespace wasm {
+namespace wasm::GlobalUtils {
 
-namespace GlobalUtils {
 // find a global initialized to the value of an import, or null if no such
 // global
 inline Global*
@@ -53,22 +53,18 @@ getGlobalInitializedToImport(Module& wasm, Name module, Name base) {
   return ret;
 }
 
-inline bool canInitializeGlobal(const Expression* curr) {
+inline bool canInitializeGlobal(Module& wasm, Expression* curr) {
   if (auto* tuple = curr->dynCast<TupleMake>()) {
     for (auto* op : tuple->operands) {
-      if (!canInitializeGlobal(op)) {
+      if (!Properties::isValidConstantExpression(wasm, op)) {
         return false;
       }
     }
     return true;
   }
-  return Properties::isSingleConstantExpression(curr) ||
-         curr->is<GlobalGet>() || curr->is<RttCanon>() || curr->is<RttSub>() ||
-         curr->is<StructNew>();
+  return Properties::isValidConstantExpression(wasm, curr);
 }
 
-} // namespace GlobalUtils
-
-} // namespace wasm
+} // namespace wasm::GlobalUtils
 
 #endif // wasm_ir_global_h

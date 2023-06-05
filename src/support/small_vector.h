@@ -116,8 +116,18 @@ public:
     usedFixed = std::min(N, newSize);
     if (newSize > N) {
       flexible.resize(newSize - N);
+    } else {
+      flexible.clear();
     }
   }
+
+  void reserve(size_t reservedSize) {
+    if (reservedSize > N) {
+      flexible.reserve(reservedSize - N);
+    }
+  }
+
+  size_t capacity() const { return N + flexible.capacity(); }
 
   bool operator==(const SmallVector<T, N>& other) const {
     if (usedFixed != other.usedFixed) {
@@ -138,9 +148,9 @@ public:
   // iteration
 
   template<typename Parent, typename Iterator> struct IteratorBase {
-    typedef T value_type;
-    typedef long difference_type;
-    typedef T& reference;
+    using value_type = T;
+    using difference_type = long;
+    using reference = T&;
 
     Parent* parent;
     size_t index;

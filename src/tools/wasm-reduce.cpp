@@ -35,8 +35,10 @@
 #include "support/colors.h"
 #include "support/command-line.h"
 #include "support/file.h"
+#include "support/hash.h"
 #include "support/path.h"
 #include "support/timing.h"
+#include "tool-options.h"
 #include "wasm-builder.h"
 #include "wasm-io.h"
 #include "wasm-validator.h"
@@ -230,6 +232,7 @@ struct Reducer
   : public WalkerPass<PostWalker<Reducer, UnifiedExpressionVisitor<Reducer>>> {
   std::string command, test, working;
   bool binary, deNan, verbose, debugInfo;
+  ToolOptions& toolOptions;
 
   // test is the file we write to that the command will operate on
   // working is the current temporary state, the reduction so far
@@ -239,30 +242,41 @@ struct Reducer
           bool binary,
           bool deNan,
           bool verbose,
-          bool debugInfo)
+          bool debugInfo,
+          ToolOptions& toolOptions)
     : command(command), test(test), working(working), binary(binary),
-      deNan(deNan), verbose(verbose), debugInfo(debugInfo) {}
+      deNan(deNan), verbose(verbose), debugInfo(debugInfo),
+      toolOptions(toolOptions) {}
 
   // runs passes in order to reduce, until we can't reduce any more
   // the criterion here is wasm binary size
   void reduceUsingPasses() {
     // run optimization passes until we can't shrink it any more
     std::vector<std::string> passes = {
+      // Optimization modes.
       "-Oz",
       "-Os",
       "-O1",
       "-O2",
       "-O3",
       "-O4",
+      // Optimization modes + passes that work well with them.
       "--flatten -Os",
       "--flatten -O3",
-      "--flatten --local-cse -Os",
+      "--flatten --simplify-locals-notee-nostructure --local-cse -Os",
+      "--type-ssa -Os --type-merging",
+      "--gufa -O1",
+      // Individual passes or combinations of them.
       "--coalesce-locals --vacuum",
+      "--dae",
+      "--dae-optimizing",
       "--dce",
       "--duplicate-function-elimination",
+      "--gto",
       "--inlining",
       "--inlining-optimizing",
       "--optimize-level=3 --inlining-optimizing",
+      "--local-cse",
       "--memory-packing",
       "--remove-unused-names --merge-blocks --vacuum",
       "--optimize-instructions",
@@ -274,8 +288,11 @@ struct Reducer
       "--remove-unused-nonfunction-module-elements",
       "--reorder-functions",
       "--reorder-locals",
+      // TODO: signature* passes
+      "--simplify-globals",
       "--simplify-locals --vacuum",
       "--strip",
+      "--remove-unused-types",
       "--vacuum"};
     auto oldSize = file_size(working);
     bool more = true;
@@ -287,9 +304,6 @@ struct Reducer
       for (auto pass : passes) {
         std::string currCommand = Path::getBinaryenBinaryTool("wasm-opt") + " ";
         currCommand += working + " -o " + test + " " + pass + " " + extraFlags;
-        if (debugInfo) {
-          currCommand += " -g ";
-        }
         if (!binary) {
           currCommand += " -S ";
         }
@@ -344,7 +358,7 @@ struct Reducer
   }
 
   void loadWorking() {
-    module = make_unique<Module>();
+    module = std::make_unique<Module>();
     ModuleReader reader;
     try {
       reader.read(working, *module);
@@ -353,13 +367,17 @@ struct Reducer
       std::cerr << '\n';
       Fatal() << "error in parsing working wasm binary";
     }
+
     // If there is no features section, assume we may need them all (without
     // this, a module with no features section but that uses e.g. atomics and
     // bulk memory would not work).
     if (!module->hasFeaturesSection) {
       module->features = FeatureSet::All;
     }
-    builder = make_unique<Builder>(*module);
+    // Apply features the user passed on the commandline.
+    toolOptions.applyFeatures(*module);
+
+    builder = std::make_unique<Builder>(*module);
     setModule(module.get());
   }
 
@@ -393,10 +411,21 @@ struct Reducer
     return out == expected;
   }
 
+  size_t decisionCounter = 0;
+
   bool shouldTryToReduce(size_t bonus = 1) {
-    static size_t counter = 0;
-    counter += bonus;
-    return (counter % factor) <= bonus;
+    assert(bonus > 0);
+    // Increment to avoid returning the same result each time.
+    decisionCounter += bonus;
+    return (decisionCounter % factor) <= bonus;
+  }
+
+  // Returns a random number in the range [0, max). This is deterministic given
+  // all the previous work done in the reducer.
+  size_t deterministicRandom(size_t max) {
+    assert(max > 0);
+    hash_combine(decisionCounter, max);
+    return decisionCounter % max;
   }
 
   bool isOkReplacement(Expression* with) {
@@ -465,7 +494,7 @@ struct Reducer
 
   std::string getLocation() {
     if (getFunction()) {
-      return getFunction()->name.str;
+      return getFunction()->name.toString();
     }
     return "(non-function context)";
   }
@@ -567,6 +596,13 @@ struct Reducer
         tryToReplaceCurrent(loop->body);
       }
       return; // nothing more to do
+    } else if (curr->is<Drop>()) {
+      if (curr->type == Type::none) {
+        // We can't improve this: the child has a different type than us. Return
+        // here to avoid reaching the code below that tries to add a drop on
+        // children (which would recreate the current state).
+        return;
+      }
     }
     // Finally, try to replace with a child.
     for (auto* child : ChildIterator(curr)) {
@@ -610,14 +646,9 @@ struct Reducer
               case Type::f64:
                 fixed = builder->makeUnary(TruncSFloat64ToInt32, child);
                 break;
+              // not implemented yet
               case Type::v128:
-              case Type::funcref:
-              case Type::externref:
-              case Type::anyref:
-              case Type::eqref:
-              case Type::i31ref:
-              case Type::dataref:
-                continue; // not implemented yet
+                continue;
               case Type::none:
               case Type::unreachable:
                 WASM_UNREACHABLE("unexpected type");
@@ -638,14 +669,9 @@ struct Reducer
               case Type::f64:
                 fixed = builder->makeUnary(TruncSFloat64ToInt64, child);
                 break;
+              // not implemented yet
               case Type::v128:
-              case Type::funcref:
-              case Type::externref:
-              case Type::anyref:
-              case Type::eqref:
-              case Type::i31ref:
-              case Type::dataref:
-                continue; // not implemented yet
+                continue;
               case Type::none:
               case Type::unreachable:
                 WASM_UNREACHABLE("unexpected type");
@@ -666,14 +692,9 @@ struct Reducer
               case Type::f64:
                 fixed = builder->makeUnary(DemoteFloat64, child);
                 break;
+              // not implemented yet
               case Type::v128:
-              case Type::funcref:
-              case Type::externref:
-              case Type::anyref:
-              case Type::eqref:
-              case Type::i31ref:
-              case Type::dataref:
-                continue; // not implemented yet
+                continue;
               case Type::none:
               case Type::unreachable:
                 WASM_UNREACHABLE("unexpected type");
@@ -694,28 +715,18 @@ struct Reducer
                 break;
               case Type::f64:
                 WASM_UNREACHABLE("unexpected type");
+              // not implemented yet
               case Type::v128:
-              case Type::funcref:
-              case Type::externref:
-              case Type::anyref:
-              case Type::eqref:
-              case Type::i31ref:
-              case Type::dataref:
-                continue; // not implemented yet
+                continue;
               case Type::none:
               case Type::unreachable:
                 WASM_UNREACHABLE("unexpected type");
             }
             break;
           }
+          // not implemented yet
           case Type::v128:
-          case Type::funcref:
-          case Type::externref:
-          case Type::anyref:
-          case Type::eqref:
-          case Type::i31ref:
-          case Type::dataref:
-            continue; // not implemented yet
+            continue;
           case Type::none:
           case Type::unreachable:
             WASM_UNREACHABLE("unexpected type");
@@ -741,20 +752,14 @@ struct Reducer
 
   // TODO: bisection on segment shrinking?
 
-  void visitMemory(Memory* curr) {
-    std::cerr << "|    try to simplify memory\n";
-
+  void visitDataSegment(DataSegment* curr) {
     // try to reduce to first function. first, shrink segment elements.
     // while we are shrinking successfully, keep going exponentially.
     bool shrank = false;
-    for (auto& segment : curr->segments) {
-      shrank = shrinkByReduction(&segment, 2);
-    }
+    shrank = shrinkByReduction(curr, 2);
     // the "opposite" of shrinking: copy a 'zero' element
-    for (auto& segment : curr->segments) {
-      reduceByZeroing(
-        &segment, 0, [](char item) { return item == 0; }, 2, shrank);
-    }
+    reduceByZeroing(
+      curr, 0, [](char item) { return item == 0; }, 2, shrank);
   }
 
   template<typename T, typename U, typename C>
@@ -820,7 +825,10 @@ struct Reducer
     // First, shrink segment elements.
     bool shrank = false;
     for (auto& segment : module->elementSegments) {
-      shrank = shrank || shrinkByReduction(segment.get(), 1);
+      // Try to shrink all the segments (code in shrinkByReduction will decide
+      // which to actually try to shrink, based on the current factor), and note
+      // if we shrank anything at all (which we'll use later down).
+      shrank = shrinkByReduction(segment.get(), 1) || shrank;
     }
 
     // Second, try to replace elements with a "zero".
@@ -865,17 +873,26 @@ struct Reducer
   // amount of reduction that justifies doing even more.
   bool reduceFunctions() {
     // try to remove functions
-    std::cerr << "|    try to remove functions\n";
     std::vector<Name> functionNames;
     for (auto& func : module->functions) {
       functionNames.push_back(func->name);
+    }
+    auto numFuncs = functionNames.size();
+    if (numFuncs == 0) {
+      return false;
     }
     size_t skip = 1;
     size_t maxSkip = 1;
     // If we just removed some functions in the previous iteration, keep trying
     // to remove more as this is one of the most efficient ways to reduce.
     bool justReduced = true;
-    for (size_t i = 0; i < functionNames.size(); i++) {
+    // Start from a new place each time.
+    size_t base = deterministicRandom(numFuncs);
+    std::cerr << "|    try to remove functions (base: " << base
+              << ", decisionCounter: " << decisionCounter << ", numFuncs "
+              << numFuncs << ")\n";
+    for (size_t x = 0; x < functionNames.size(); x++) {
+      size_t i = (base + x) % numFuncs;
       if (!justReduced &&
           functionsWeTriedToRemove.count(functionNames[i]) == 1 &&
           !shouldTryToReduce(std::max((factor / 5) + 1, 20000))) {
@@ -893,18 +910,22 @@ struct Reducer
       if (names.size() == 0) {
         continue;
       }
+      std::cerr << "|     trying at i=" << i << " of size " << names.size()
+                << "\n";
       // Try to remove functions and/or empty them. Note that
       // tryToRemoveFunctions() will reload the module if it fails, which means
       // function names may change - for that reason, run it second.
       justReduced = tryToEmptyFunctions(names) || tryToRemoveFunctions(names);
       if (justReduced) {
         noteReduction(names.size());
-        i += skip;
+        // Subtract 1 since the loop increments us anyhow by one: we want to
+        // skip over the skipped functions, and not any more.
+        x += skip - 1;
         skip = std::min(size_t(factor), 2 * skip);
         maxSkip = std::max(skip, maxSkip);
       } else {
         skip = std::max(skip / 2, size_t(1)); // or 1?
-        i += factor / 100;
+        x += factor / 100;
       }
     }
     // If maxSkip is 1 then we never reduced at all. If it is 2 then we did
@@ -1126,7 +1147,7 @@ struct Reducer
     }
     // try to replace with a trivial value
     if (curr->type.isNullable()) {
-      RefNull* n = builder->makeRefNull(curr->type);
+      RefNull* n = builder->makeRefNull(curr->type.getHeapType());
       return tryToReplaceCurrent(n);
     }
     if (curr->type.isTuple() && curr->type.isDefaultable()) {
@@ -1174,9 +1195,12 @@ int main(int argc, const char* argv[]) {
   std::string binDir = Path::getDirName(argv[0]);
   bool binary = true, deNan = false, verbose = false, debugInfo = false,
        force = false;
-  Options options("wasm-reduce",
-                  "Reduce a wasm file to a smaller one that has the same "
-                  "behavior on a given command");
+
+  const std::string WasmReduceOption = "wasm-reduce options";
+
+  ToolOptions options("wasm-reduce",
+                      "Reduce a wasm file to a smaller one that has the same "
+                      "behavior on a given command");
   options
     .add("--command",
          "-cmd",
@@ -1184,12 +1208,14 @@ int main(int argc, const char* argv[]) {
          "the command's output identical. "
          "We look at the command's return code and stdout here (TODO: stderr), "
          "and we reduce while keeping those unchanged.",
+         WasmReduceOption,
          Options::Arguments::One,
          [&](Options* o, const std::string& argument) { command = argument; })
     .add("--test",
          "-t",
          "Test file (this will be written to to test, the given command should "
          "read it when we call it)",
+         WasmReduceOption,
          Options::Arguments::One,
          [&](Options* o, const std::string& argument) { test = argument; })
     .add("--working",
@@ -1197,11 +1223,13 @@ int main(int argc, const char* argv[]) {
          "Working file (this will contain the current good state while doing "
          "temporary computations, "
          "and will contain the final best result at the end)",
+         WasmReduceOption,
          Options::Arguments::One,
          [&](Options* o, const std::string& argument) { working = argument; })
     .add("--binaries",
          "-b",
          "binaryen binaries location (bin/ directory)",
+         WasmReduceOption,
          Options::Arguments::One,
          [&](Options* o, const std::string& argument) {
            // Add separator just in case
@@ -1211,33 +1239,39 @@ int main(int argc, const char* argv[]) {
          "-S",
          "Emit intermediate files as text, instead of binary (also make sure "
          "the test and working files have a .wat or .wast suffix)",
+         WasmReduceOption,
          Options::Arguments::Zero,
          [&](Options* o, const std::string& argument) { binary = false; })
     .add("--denan",
          "",
          "Avoid nans when reducing",
+         WasmReduceOption,
          Options::Arguments::Zero,
          [&](Options* o, const std::string& argument) { deNan = true; })
     .add("--verbose",
          "-v",
          "Verbose output mode",
+         WasmReduceOption,
          Options::Arguments::Zero,
          [&](Options* o, const std::string& argument) { verbose = true; })
     .add("--debugInfo",
          "-g",
          "Keep debug info in binaries",
+         WasmReduceOption,
          Options::Arguments::Zero,
          [&](Options* o, const std::string& argument) { debugInfo = true; })
     .add("--force",
          "-f",
          "Force the reduction attempt, ignoring problems that imply it is "
          "unlikely to succeed",
+         WasmReduceOption,
          Options::Arguments::Zero,
          [&](Options* o, const std::string& argument) { force = true; })
     .add("--timeout",
          "-to",
          "A timeout to apply to each execution of the command, in seconds "
          "(default: 2)",
+         WasmReduceOption,
          Options::Arguments::One,
          [&](Options* o, const std::string& argument) {
            timeout = atoi(argument.c_str());
@@ -1247,6 +1281,7 @@ int main(int argc, const char* argv[]) {
          "-ef",
          "Extra commandline flags to pass to wasm-opt while reducing. "
          "(default: --enable-all)",
+         WasmReduceOption,
          Options::Arguments::One,
          [&](Options* o, const std::string& argument) {
            extraFlags = argument;
@@ -1257,6 +1292,10 @@ int main(int argc, const char* argv[]) {
       Options::Arguments::One,
       [&](Options* o, const std::string& argument) { input = argument; });
   options.parse(argc, argv);
+
+  if (debugInfo) {
+    extraFlags += " -g ";
+  }
 
   if (test.size() == 0) {
     Fatal() << "test file not provided\n";
@@ -1276,6 +1315,7 @@ int main(int argc, const char* argv[]) {
   std::cerr << "|test: " << test << '\n';
   std::cerr << "|working: " << working << '\n';
   std::cerr << "|bin dir: " << binDir << '\n';
+  std::cerr << "|extra flags: " << extraFlags << '\n';
 
   // get the expected output
   copy_file(input, test);
@@ -1361,7 +1401,8 @@ int main(int argc, const char* argv[]) {
   bool stopping = false;
 
   while (1) {
-    Reducer reducer(command, test, working, binary, deNan, verbose, debugInfo);
+    Reducer reducer(
+      command, test, working, binary, deNan, verbose, debugInfo, options);
 
     // run binaryen optimization passes to reduce. passes are fast to run
     // and can often reduce large amounts of code efficiently, as opposed

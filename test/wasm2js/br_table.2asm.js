@@ -1,6 +1,6 @@
-import { setTempRet0 } from 'env';
+import * as env from 'env';
 
-function asmFunc(env) {
+function asmFunc(imports) {
  var Math_imul = Math.imul;
  var Math_fround = Math.fround;
  var Math_abs = Math.abs;
@@ -11,9 +11,7 @@ function asmFunc(env) {
  var Math_ceil = Math.ceil;
  var Math_trunc = Math.trunc;
  var Math_sqrt = Math.sqrt;
- var abort = env.abort;
- var nan = NaN;
- var infinity = Infinity;
+ var env = imports.env;
  var setTempRet0 = env.setTempRet0;
  var i64toi32_i32$HIGH_BITS = 0;
  function dummy() {
@@ -12560,12 +12558,12 @@ function asmFunc(env) {
  
  function $20() {
   var $1_1 = 0, $2_1 = 0, $4_1 = 0;
-  fake_return_waka123 : {
+  __binaryen_fake_return : {
    loop_in : while (1) {
     $1_1 = 3;
     switch (0 | 0) {
     default:
-     break fake_return_waka123;
+     break __binaryen_fake_return;
     };
    };
   }
@@ -12574,13 +12572,13 @@ function asmFunc(env) {
  
  function $21() {
   var $1_1 = 0, $2_1 = 0, $4_1 = 0;
-  fake_return_waka123 : {
+  __binaryen_fake_return : {
    loop_in : while (1) {
     dummy();
     $1_1 = 4;
     switch (-1 | 0) {
     default:
-     break fake_return_waka123;
+     break __binaryen_fake_return;
     };
    };
   }
@@ -12589,13 +12587,13 @@ function asmFunc(env) {
  
  function $22() {
   var $1_1 = 0;
-  fake_return_waka123 : {
+  __binaryen_fake_return : {
    loop_in : while (1) {
     dummy();
     $1_1 = 5;
     switch (1 | 0) {
     default:
-     break fake_return_waka123;
+     break __binaryen_fake_return;
     };
    };
   }
@@ -13421,9 +13419,9 @@ function asmFunc(env) {
  };
 }
 
-var retasmFunc = asmFunc(  { abort: function() { throw new Error('abort'); },
-    setTempRet0
-  });
+var retasmFunc = asmFunc({
+  "env": env,
+});
 export var type_i32 = retasmFunc.type_i32;
 export var type_i64 = retasmFunc.type_i64;
 export var type_f32 = retasmFunc.type_f32;

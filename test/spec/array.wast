@@ -1,5 +1,3 @@
-;; XXX BINARYEN: rename array.new_default => array.new_default_with_rtt
-
 ;; Type syntax
 
 (module
@@ -10,11 +8,9 @@
   (type (array f32))
   (type (array f64))
   (type (array anyref))
-  (type (array (ref data)))
+  (type (array (ref struct)))
   (type (array (ref 0)))
   (type (array (ref null 1)))
-  (type (array (rtt 1)))
-  (type (array (rtt 10 1)))
   (type (array (mut i8)))
   (type (array (mut i16)))
   (type (array (mut i32)))
@@ -22,11 +18,9 @@
   (type (array (mut i32)))
   (type (array (mut i64)))
   (type (array (mut anyref)))
-  (type (array (mut (ref data))))
+  (type (array (mut (ref struct))))
   (type (array (mut (ref 0))))
   (type (array (mut (ref null i31))))
-  (type (array (mut (rtt 0))))
-  (type (array (mut (rtt 10 0))))
 )
 
 
@@ -41,12 +35,15 @@
 ;; Binding structure
 
 (module
-  (type $s0 (array (ref $s1)))
-  (type $s1 (array (ref $s0)))
+  (rec
+    (type $s0 (array (ref $s1)))
+    (type $s1 (array (ref $s0)))
+  )
 
-  (func (param (ref $forward)))
-
-  (type $forward (array i32))
+  (rec
+    (func (param (ref $forward)))
+    (type $forward (array i32))
+  )
 )
 
 (assert_invalid
@@ -70,7 +67,7 @@
   )
   (func (export "get") (param $i i32) (result f32)
     (call $get (local.get $i)
-      (array.new_default_with_rtt $vec (i32.const 3) (rtt.canon $vec))
+      (array.new_default $vec (i32.const 3))
     )
   )
 
@@ -80,7 +77,7 @@
   )
   (func (export "set_get") (param $i i32) (param $y f32) (result f32)
     (call $set_get (local.get $i)
-      (array.new_default_with_rtt $mvec (i32.const 3) (rtt.canon $mvec))
+      (array.new_default $mvec (i32.const 3))
       (local.get $y)
     )
   )
@@ -89,7 +86,7 @@
     (array.len $vec (local.get $v))
   )
   (func (export "len") (result i32)
-    (call $len (array.new_default_with_rtt $vec (i32.const 3) (rtt.canon $vec)))
+    (call $len (array.new_default $vec (i32.const 3)))
   )
 )
 
@@ -130,16 +127,8 @@
   (module
     (type $t (array i32))
     (func (export "array.new-null")
-      (local (ref null (rtt $t))) (drop (array.new_default_with_rtt $t (i32.const 1) (i32.const 3) (local.get 0)))
-    )
-  )
-  "type mismatch"
-)
-(assert_invalid
-  (module
-    (type $t (array (mut i32)))
-    (func (export "array.new_default_with_rtt-null")
-      (local (ref null (rtt $t))) (drop (array.new_default_with_rtt $t (i32.const 3) (local.get 0)))
+      (local i64)
+      (drop (array.new_default $t (local.get 0)))
     )
   )
   "type mismatch"

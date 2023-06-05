@@ -33,7 +33,7 @@ namespace wasm {
 struct PrintCallGraph : public Pass {
   bool modifiesBinaryenIR() override { return false; }
 
-  void run(PassRunner* runner, Module* module) override {
+  void run(Module* module) override {
     std::ostream& o = std::cout;
     o << "digraph call {\n"
          "  rankdir = LR;\n"
@@ -86,10 +86,9 @@ struct PrintCallGraph : public Pass {
       }
       void visitCall(Call* curr) {
         auto* target = module->getFunction(curr->target);
-        if (visitedTargets.count(target->name) > 0) {
+        if (!visitedTargets.emplace(target->name).second) {
           return;
         }
-        visitedTargets.insert(target->name);
         std::cout << "  \"" << currFunction->name << "\" -> \"" << target->name
                   << "\"; // call\n";
       }

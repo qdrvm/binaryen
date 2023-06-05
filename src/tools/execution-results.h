@@ -23,7 +23,7 @@
 
 namespace wasm {
 
-typedef std::vector<Literal> Loggings;
+using Loggings = std::vector<Literal>;
 
 // Logs every relevant import call parameter.
 struct LoggingExternalInterface : public ShellExternalInterface {
@@ -39,7 +39,7 @@ struct LoggingExternalInterface : public ShellExternalInterface {
 
   LoggingExternalInterface(Loggings& loggings) : loggings(loggings) {}
 
-  Literals callImport(Function* import, LiteralList& arguments) override {
+  Literals callImport(Function* import, Literals& arguments) override {
     if (import->module == "fuzzing-support") {
       std::cout << "[LoggingExternalInterface logging";
       loggings.push_back(Literal()); // buffer with a None between calls
@@ -87,7 +87,10 @@ struct LoggingExternalInterface : public ShellExternalInterface {
 // we can only get results when there are no imports. we then call each method
 // that has a result, with some values
 struct ExecutionResults {
-  std::map<Name, Literals> results;
+  struct Trap {};
+  struct Exception {};
+  using FunctionResult = std::variant<Literals, Trap, Exception>;
+  std::map<Name, FunctionResult> results;
   Loggings loggings;
 
   // If set, we should ignore this and not compare it to anything.
@@ -97,7 +100,7 @@ struct ExecutionResults {
   void get(Module& wasm) {
     LoggingExternalInterface interface(loggings);
     try {
-      ModuleInstance instance(wasm, &interface);
+      ModuleRunner instance(wasm, &interface);
       // execute all exported methods (that are therefore preserved through
       // opts)
       for (auto& exp : wasm.exports) {
@@ -106,30 +109,34 @@ struct ExecutionResults {
         }
         std::cout << "[fuzz-exec] calling " << exp->name << "\n";
         auto* func = wasm.getFunction(exp->value);
-        if (func->getResults() != Type::none) {
-          // this has a result
-          Literals ret = run(func, wasm, instance);
-          results[exp->name] = ret;
+        FunctionResult ret = run(func, wasm, instance);
+        results[exp->name] = ret;
+        if (auto* values = std::get_if<Literals>(&ret)) {
           // ignore the result if we hit an unreachable and returned no value
-          if (ret.size() > 0) {
+          if (values->size() > 0) {
             std::cout << "[fuzz-exec] note result: " << exp->name << " => ";
             auto resultType = func->getResults();
-            if (resultType.isRef()) {
+            if (resultType.isRef() && !resultType.isString()) {
               // Don't print reference values, as funcref(N) contains an index
               // for example, which is not guaranteed to remain identical after
               // optimizations.
               std::cout << resultType << '\n';
             } else {
-              std::cout << ret << '\n';
+              // Non-references can be printed in full. So can strings, since we
+              // always know how to print them and there is just one string
+              // type.
+              std::cout << *values << '\n';
             }
           }
-        } else {
-          // no result, run it anyhow (it might modify memory etc.)
-          run(func, wasm, instance);
         }
       }
     } catch (const TrapException&) {
-      // may throw in instance creation (init of offsets)
+      // May throw in instance creation (init of offsets).
+    } catch (const HostLimitException&) {
+      // May throw in instance creation (e.g. array.new of huge size).
+      // This should be ignored and not compared with, as optimizations can
+      // change whether a host limit is reached.
+      ignore = true;
     }
   }
 
@@ -144,20 +151,17 @@ struct ExecutionResults {
   }
 
   bool areEqual(Literal a, Literal b) {
-    // We allow nulls to have different types (as they compare equal regardless)
-    // but anything else must have an identical type.
-    if (a.type != b.type && !(a.isNull() && b.isNull())) {
-      std::cout << "types not identical! " << a << " != " << b << '\n';
-      return false;
-    }
     if (a.type.isRef()) {
-      // Don't compare references - only their types. There are several issues
-      // here that we can't fully handle, see
-      // https://github.com/WebAssembly/binaryen/issues/3378, but the core issue
-      // is that we are comparing results between two separate wasm modules (and
-      // a separate instance of each) - we can't really identify an identical
-      // reference between such things. We can only compare things structurally,
-      // for which we compare the types.
+      // Don't compare references. There are several issues here that we can't
+      // fully handle, see https://github.com/WebAssembly/binaryen/issues/3378,
+      // but the core issue is that since we optimize assuming a closed world,
+      // the types and structure of GC data can arbitrarily change after
+      // optimizations, even in ways that are externally visible from outside
+      // the module.
+      //
+      // TODO: Once we support optimizing under some form of open-world
+      // assumption, we should be able to check that the types and/or structure
+      // of GC data passed out of the module does not change.
       return true;
     }
     if (a != b) {
@@ -185,14 +189,18 @@ struct ExecutionResults {
       std::cout << "ignoring comparison of ExecutionResults!\n";
       return true;
     }
-    for (auto& iter : other.results) {
-      auto name = iter.first;
+    for (auto& [name, _] : other.results) {
       if (results.find(name) == results.end()) {
         std::cout << "[fuzz-exec] missing " << name << '\n';
         return false;
       }
       std::cout << "[fuzz-exec] comparing " << name << '\n';
-      if (!areEqual(results[name], other.results[name])) {
+      if (results[name].index() != other.results[name].index()) {
+        return false;
+      }
+      auto* values = std::get_if<Literals>(&results[name]);
+      auto* otherValues = std::get_if<Literals>(&other.results[name]);
+      if (values && otherValues && !areEqual(*values, *otherValues)) {
         return false;
       }
     }
@@ -210,36 +218,42 @@ struct ExecutionResults {
 
   bool operator!=(ExecutionResults& other) { return !((*this) == other); }
 
-  Literals run(Function* func, Module& wasm) {
+  FunctionResult run(Function* func, Module& wasm) {
     LoggingExternalInterface interface(loggings);
     try {
-      ModuleInstance instance(wasm, &interface);
+      ModuleRunner instance(wasm, &interface);
       return run(func, wasm, instance);
     } catch (const TrapException&) {
-      // may throw in instance creation (init of offsets)
+      // May throw in instance creation (init of offsets).
+      return {};
+    } catch (const HostLimitException&) {
+      // May throw in instance creation (e.g. array.new of huge size).
+      // This should be ignored and not compared with, as optimizations can
+      // change whether a host limit is reached.
+      ignore = true;
       return {};
     }
   }
 
-  Literals run(Function* func, Module& wasm, ModuleInstance& instance) {
+  FunctionResult run(Function* func, Module& wasm, ModuleRunner& instance) {
     try {
-      LiteralList arguments;
-      // init hang support, if present
-      if (auto* ex = wasm.getExportOrNull("hangLimitInitializer")) {
-        instance.callFunction(ex->value, arguments);
-      }
       // call the method
+      Literals arguments;
       for (const auto& param : func->getParams()) {
         // zeros in arguments TODO: more?
         if (!param.isDefaultable()) {
           std::cout << "[trap fuzzer can only send defaultable parameters to "
                        "exports]\n";
+          return Trap{};
         }
         arguments.push_back(Literal::makeZero(param));
       }
       return instance.callFunction(func->name, arguments);
     } catch (const TrapException&) {
-      return {};
+      return Trap{};
+    } catch (const WasmException& e) {
+      std::cout << "[exception thrown: " << e << "]" << std::endl;
+      return Exception{};
     } catch (const HostLimitException&) {
       // This should be ignored and not compared with, as optimizations can
       // change whether a host limit is reached.

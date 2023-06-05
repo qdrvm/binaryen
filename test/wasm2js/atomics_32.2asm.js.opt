@@ -24,15 +24,16 @@
 memorySegments[0] = base64DecodeToExistingUint8Array(new Uint8Array(6), 0, "aGVsbG8s");
 memorySegments[1] = base64DecodeToExistingUint8Array(new Uint8Array(6), 0, "d29ybGQh");
 
-  var scratchBuffer = new ArrayBuffer(16);
-  var i32ScratchView = new Int32Array(scratchBuffer);
-  var f32ScratchView = new Float32Array(scratchBuffer);
-  var f64ScratchView = new Float64Array(scratchBuffer);
-  
-  function wasm2js_atomic_wait_i32(ptr, expected, timeoutLow, timeoutHigh) {
-    if (timeoutLow != -1 || timeoutHigh != -1) throw 'unsupported timeout';
+  function wasm2js_atomic_wait_i32(offset, ptr, expected, timeoutLow, timeoutHigh) {
+    ptr = (ptr + offset) >> 2;
+    var timeout = Infinity;
+    if (timeoutHigh >= 0) {
+      // Convert from nanoseconds to milliseconds
+      // Taken from convertI32PairToI53 in emscripten's library_int53.js
+      timeout = ((timeoutLow >>> 0) / 1e6) + timeoutHigh * (4294967296 / 1e6);
+    }
     var view = new Int32Array(bufferView.buffer); // TODO cache
-    var result = Atomics.wait(view, ptr, expected);
+    var result = Atomics.wait(view, ptr, expected, timeout);
     if (result == 'ok') return 0;
     if (result == 'not-equal') return 1;
     if (result == 'timed-out') return 2;
@@ -40,7 +41,7 @@ memorySegments[1] = base64DecodeToExistingUint8Array(new Uint8Array(6), 0, "d29y
   }
       
   function wasm2js_atomic_rmw_i64(op, bytes, offset, ptr, valueLow, valueHigh) {
-    assert(bytes == 8); // TODO: support 1, 2, 4 as well
+    // TODO: support bytes=1, 2, 4 as well as 8.
     var view = new BigInt64Array(bufferView.buffer); // TODO cache
     ptr = (ptr + offset) >> 3;
     var value = BigInt(valueLow >>> 0) | (BigInt(valueHigh >>> 0) << BigInt(32));
@@ -89,7 +90,7 @@ memorySegments[1] = base64DecodeToExistingUint8Array(new Uint8Array(6), 0, "d29y
     bufferView.set(memorySegments[segment].subarray(offset, offset + size), dest);
   }
       
-function asmFunc(env) {
+function asmFunc(imports) {
  var buffer = new ArrayBuffer(16777216);
  var HEAP8 = new Int8Array(buffer);
  var HEAP16 = new Int16Array(buffer);
@@ -109,9 +110,6 @@ function asmFunc(env) {
  var Math_ceil = Math.ceil;
  var Math_trunc = Math.trunc;
  var Math_sqrt = Math.sqrt;
- var abort = env.abort;
- var nan = NaN;
- var infinity = Infinity;
  function $0() {
   Atomics.compareExchange(HEAP8, 1024, 1, 2) | 0;
   Atomics.compareExchange(HEAP16, 512, 1, 2) | 0;
@@ -120,11 +118,11 @@ function asmFunc(env) {
   Atomics.load(HEAPU16, 514);
   Atomics.load(HEAP32, 257);
   Atomics.store(HEAP32, 25, 200);
-  wasm2js_atomic_wait_i32(4, 8, -1, -1) | 0;
+  wasm2js_atomic_wait_i32(4, 8, 16, -1, -1) | 0;
   wasm2js_memory_init(0, 512, 0, 4);
   wasm2js_memory_init(1, 1024, 4, 2);
   Atomics.notify(HEAP32, 1, 2);
-  Atomics.notify(HEAP32, 4 + 20 >> 2, 2);
+  Atomics.notify(HEAP32, 4 + 20 >> 2, 4294967295);
   Atomics.add(HEAP32, 2, 12);
   Atomics.sub(HEAP32, 2, 12);
   Atomics.and(HEAP32, 2, 12);
@@ -149,6 +147,6 @@ function asmFunc(env) {
  };
 }
 
-var retasmFunc = asmFunc(  { abort: function() { throw new Error('abort'); }
-  });
+var retasmFunc = asmFunc({
+});
 export var test = retasmFunc.test;

@@ -1,5 +1,5 @@
 
-function asmFunc(env) {
+function asmFunc(imports) {
  var Math_imul = Math.imul;
  var Math_fround = Math.fround;
  var Math_abs = Math.abs;
@@ -10,9 +10,6 @@ function asmFunc(env) {
  var Math_ceil = Math.ceil;
  var Math_trunc = Math.trunc;
  var Math_sqrt = Math.sqrt;
- var abort = env.abort;
- var nan = NaN;
- var infinity = Infinity;
  function even(n) {
   n = n | 0;
   var $10 = 0;
@@ -41,7 +38,7 @@ function asmFunc(env) {
  };
 }
 
-var retasmFunc = asmFunc(  { abort: function() { throw new Error('abort'); }
-  });
+var retasmFunc = asmFunc({
+});
 export var even = retasmFunc.even;
 export var odd = retasmFunc.odd;

@@ -31,11 +31,11 @@
 #include "wasm-s-parser.h"
 #include "wasm-validator.h"
 
-using namespace cashew;
 using namespace wasm;
 
 Name ASSERT_RETURN("assert_return");
 Name ASSERT_TRAP("assert_trap");
+Name ASSERT_EXCEPTION("assert_exception");
 Name ASSERT_INVALID("assert_invalid");
 Name ASSERT_MALFORMED("assert_malformed");
 Name ASSERT_UNLINKABLE("assert_unlinkable");
@@ -47,17 +47,21 @@ struct ShellOptions : public Options {
   Name entry;
   std::set<size_t> skipped;
 
+  const std::string WasmShellOption = "wasm-shell options";
+
   ShellOptions(const std::string& command, const std::string& description)
     : Options(command, description) {
     (*this)
       .add("--entry",
            "-e",
            "Call the entry point after parsing the module",
+           WasmShellOption,
            Options::Arguments::One,
            [this](Options*, const std::string& argument) { entry = argument; })
       .add("--skip",
            "-s",
            "Skip input on certain lines (comma-separated-list)",
+           WasmShellOption,
            Options::Arguments::One,
            [this](Options*, const std::string& argument) {
              size_t i = 0;
@@ -84,16 +88,16 @@ protected:
   std::map<Name, std::shared_ptr<Module>> modules;
   std::map<Name, std::shared_ptr<SExpressionWasmBuilder>> builders;
   std::map<Name, std::shared_ptr<ShellExternalInterface>> interfaces;
-  std::map<Name, std::shared_ptr<ModuleInstance>> instances;
+  std::map<Name, std::shared_ptr<ModuleRunner>> instances;
   // used for imports
-  std::map<Name, std::shared_ptr<ModuleInstance>> linkedInstances;
+  std::map<Name, std::shared_ptr<ModuleRunner>> linkedInstances;
 
   Name lastModule;
 
   void instantiate(Module* wasm) {
     auto tempInterface =
       std::make_shared<ShellExternalInterface>(linkedInstances);
-    auto tempInstance = std::make_shared<ModuleInstance>(
+    auto tempInstance = std::make_shared<ModuleRunner>(
       *wasm, tempInterface.get(), linkedInstances);
     interfaces[wasm->name].swap(tempInterface);
     instances[wasm->name].swap(tempInstance);
@@ -111,6 +115,8 @@ protected:
       parseAssertReturn(s);
     } else if (id == ASSERT_TRAP) {
       parseAssertTrap(s);
+    } else if (id == ASSERT_EXCEPTION) {
+      parseAssertException(s);
     } else if ((id == ASSERT_INVALID) || (id == ASSERT_MALFORMED)) {
       parseModuleAssertion(s);
     }
@@ -158,7 +164,7 @@ protected:
     instances[name] = instances[lastModule];
 
     Colors::green(std::cerr);
-    std::cerr << "REGISTER MODULE INSTANCE AS \"" << name.c_str()
+    std::cerr << "REGISTER MODULE INSTANCE AS \"" << name.str
               << "\"  [line: " << s.line << "]\n";
     Colors::normal(std::cerr);
   }
@@ -169,13 +175,13 @@ protected:
     if (s[i]->dollared()) {
       moduleName = s[i++]->str();
     }
-    ModuleInstance* instance = instances[moduleName].get();
+    ModuleRunner* instance = instances[moduleName].get();
     assert(instance);
 
     Name base = s[i++]->str();
 
     if (s[0]->str() == INVOKE) {
-      LiteralList args;
+      Literals args;
       while (i < s.size()) {
         Expression* argument = builders[moduleName]->parseExpression(*s[i++]);
         args.push_back(getLiteralFromConstExpression(argument));
@@ -186,11 +192,11 @@ protected:
       return instance->getExport(base);
     }
 
-    Fatal() << "Invalid operation " << s[0]->c_str();
+    Fatal() << "Invalid operation " << s[0]->toString();
   }
 
   void parseAssertTrap(Element& s) {
-    bool trapped = false;
+    [[maybe_unused]] bool trapped = false;
     auto& inner = *s[1];
     if (inner[0]->str() == MODULE) {
       return parseModuleAssertion(s);
@@ -200,12 +206,24 @@ protected:
       parseOperation(inner);
     } catch (const TrapException&) {
       trapped = true;
-    } catch (const WasmException& e) {
-      std::cout << "[exception thrown: " << e << "]" << std::endl;
-      trapped = true;
+    }
+    assert(trapped);
+  }
+
+  void parseAssertException(Element& s) {
+    [[maybe_unused]] bool thrown = false;
+    auto& inner = *s[1];
+    if (inner[0]->str() == MODULE) {
+      return parseModuleAssertion(s);
     }
 
-    assert(trapped);
+    try {
+      parseOperation(inner);
+    } catch (const WasmException& e) {
+      std::cout << "[exception thrown: " << e << "]" << std::endl;
+      thrown = true;
+    }
+    assert(thrown);
   }
 
   void parseAssertReturn(Element& s) {
@@ -215,7 +233,7 @@ protected:
       expected = getLiteralsFromConstExpression(
         builders[lastModule]->parseExpression(*s[2]));
     }
-    bool trapped = false;
+    [[maybe_unused]] bool trapped = false;
     try {
       actual = parseOperation(*s[1]);
     } catch (const TrapException&) {
@@ -279,12 +297,10 @@ protected:
           }
         }
       });
-      if (wasm.memory.imported()) {
-        reportUnknownImport(&wasm.memory);
-      }
+      ModuleUtils::iterImportedMemories(wasm, reportUnknownImport);
     }
 
-    if (!invalid && id == ASSERT_TRAP) {
+    if (!invalid && (id == ASSERT_TRAP || id == ASSERT_EXCEPTION)) {
       try {
         instantiate(&wasm);
       } catch (const TrapException&) {
@@ -327,7 +343,7 @@ protected:
                                            Builder::Immutable));
     spectest->addGlobal(builder.makeGlobal(Name::fromInt(2),
                                            Type::f32,
-                                           builder.makeConst<float>(666.6),
+                                           builder.makeConst<float>(666.6f),
                                            Builder::Immutable));
     spectest->addGlobal(builder.makeGlobal(Name::fromInt(3),
                                            Type::f64,
@@ -342,16 +358,15 @@ protected:
     spectest->addExport(
       builder.makeExport("global_f64", Name::fromInt(3), ExternalKind::Global));
 
-    spectest->addTable(
-      builder.makeTable(Name::fromInt(0), Type::funcref, 10, 20));
+    spectest->addTable(builder.makeTable(
+      Name::fromInt(0), Type(HeapType::func, Nullable), 10, 20));
     spectest->addExport(
       builder.makeExport("table", Name::fromInt(0), ExternalKind::Table));
 
-    spectest->memory.exists = true;
-    spectest->memory.initial = 1;
-    spectest->memory.max = 2;
-    spectest->addExport(builder.makeExport(
-      "memory", spectest->memory.name, ExternalKind::Memory));
+    Memory* memory =
+      spectest->addMemory(builder.makeMemory(Name::fromInt(0), 1, 2));
+    spectest->addExport(
+      builder.makeExport("memory", memory->name, ExternalKind::Memory));
 
     modules["spectest"].swap(spectest);
     modules["spectest"]->features = FeatureSet::All;

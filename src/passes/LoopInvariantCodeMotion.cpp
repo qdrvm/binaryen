@@ -37,9 +37,11 @@ struct LoopInvariantCodeMotion
   : public WalkerPass<ExpressionStackWalker<LoopInvariantCodeMotion>> {
   bool isFunctionParallel() override { return true; }
 
-  Pass* create() override { return new LoopInvariantCodeMotion; }
+  std::unique_ptr<Pass> create() override {
+    return std::make_unique<LoopInvariantCodeMotion>();
+  }
 
-  typedef std::unordered_set<LocalSet*> LoopSets;
+  using LoopSets = std::unordered_set<LocalSet*>;
 
   // main entry point
 
@@ -60,14 +62,13 @@ struct LoopInvariantCodeMotion
     // Accumulate effects of things we can't move out - things
     // we move out later must cross them, so we must verify it
     // is ok to do so.
-    FeatureSet features = getModule()->features;
-    EffectAnalyzer effectsSoFar(getPassOptions(), features);
+    EffectAnalyzer effectsSoFar(getPassOptions(), *getModule());
     // The loop's total effects also matter. For example, a store
     // in the loop means we can't move a load outside.
     // FIXME: we look at the loop "tail" area too, after the last
     //        possible branch back, which can cause false positives
     //        for bad effect interactions.
-    EffectAnalyzer loopEffects(getPassOptions(), features, loop);
+    EffectAnalyzer loopEffects(getPassOptions(), *getModule(), loop);
     // Note all the sets in each loop, and how many per index. Currently
     // EffectAnalyzer can't do that, and we need it to know if we
     // can move a set out of the loop (if there is another set
@@ -76,7 +77,6 @@ struct LoopInvariantCodeMotion
     // FIXME: also the loop tail issue from above.
     auto numLocals = getFunction()->getNumLocals();
     std::vector<Index> numSetsForIndex(numLocals);
-    std::fill(numSetsForIndex.begin(), numSetsForIndex.end(), 0);
     LoopSets loopSets;
     {
       FindAll<LocalSet> finder(loop);
@@ -108,7 +108,7 @@ struct LoopInvariantCodeMotion
         // a branch to it anyhow, so we would stop before that point anyhow.
       }
       // If this may branch, we are done.
-      EffectAnalyzer effects(getPassOptions(), features, curr);
+      EffectAnalyzer effects(getPassOptions(), *getModule(), curr);
       if (effects.transfersControlFlow()) {
         break;
       }
@@ -121,11 +121,12 @@ struct LoopInvariantCodeMotion
         // The rest of the loop's effects matter too, we must also
         // take into account global state like interacting loads and
         // stores.
-        bool unsafeToMove =
-          effects.writesGlobalState() || effectsSoFar.invalidates(effects) ||
-          (effects.readsGlobalState() && loopEffects.writesGlobalState());
+        bool unsafeToMove = effects.writesGlobalState() ||
+                            effectsSoFar.invalidates(effects) ||
+                            (effects.readsMutableGlobalState() &&
+                             loopEffects.writesGlobalState());
         // TODO: look into optimizing this with exceptions. for now, disallow
-        if (effects.throws || loopEffects.throws) {
+        if (effects.throws() || loopEffects.throws()) {
           unsafeToMove = true;
         }
         if (!unsafeToMove) {

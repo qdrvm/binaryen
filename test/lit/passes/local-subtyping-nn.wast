@@ -3,18 +3,17 @@
 ;; RUN:   | filecheck %s
 
 (module
-  ;; CHECK:      (type $struct (struct ))
   (type $struct (struct))
 
   ;; CHECK:      (import "out" "i32" (func $i32 (result i32)))
   (import "out" "i32" (func $i32 (result i32)))
 
-  ;; CHECK:      (func $non-nullable
-  ;; CHECK-NEXT:  (local $x (ref $struct))
+  ;; CHECK:      (func $non-nullable (type $none_=>_none)
+  ;; CHECK-NEXT:  (local $x (ref none))
   ;; CHECK-NEXT:  (local $y (ref $none_=>_i32))
   ;; CHECK-NEXT:  (local.set $x
   ;; CHECK-NEXT:   (ref.as_non_null
-  ;; CHECK-NEXT:    (ref.null $struct)
+  ;; CHECK-NEXT:    (ref.null none)
   ;; CHECK-NEXT:   )
   ;; CHECK-NEXT:  )
   ;; CHECK-NEXT:  (local.set $y
@@ -26,7 +25,7 @@
   ;; CHECK-NEXT: )
   (func $non-nullable
     (local $x (ref null $struct))
-    (local $y anyref)
+    (local $y funcref)
     ;; x is assigned a value that is non-nullable.
     (local.set $x
       (ref.as_non_null (ref.null $struct))
@@ -42,13 +41,13 @@
     )
   )
 
-  ;; CHECK:      (func $uses-default (param $i i32)
-  ;; CHECK-NEXT:  (local $x (ref null $struct))
+  ;; CHECK:      (func $uses-default (type $i32_=>_none) (param $i i32)
+  ;; CHECK-NEXT:  (local $x nullref)
   ;; CHECK-NEXT:  (if
   ;; CHECK-NEXT:   (local.get $i)
   ;; CHECK-NEXT:   (local.set $x
   ;; CHECK-NEXT:    (ref.as_non_null
-  ;; CHECK-NEXT:     (ref.null $struct)
+  ;; CHECK-NEXT:     (ref.null none)
   ;; CHECK-NEXT:    )
   ;; CHECK-NEXT:   )
   ;; CHECK-NEXT:  )

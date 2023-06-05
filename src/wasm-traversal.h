@@ -50,6 +50,7 @@ template<typename SubType, typename ReturnType = void> struct Visitor {
   ReturnType visitTable(Table* curr) { return ReturnType(); }
   ReturnType visitElementSegment(ElementSegment* curr) { return ReturnType(); }
   ReturnType visitMemory(Memory* curr) { return ReturnType(); }
+  ReturnType visitDataSegment(DataSegment* curr) { return ReturnType(); }
   ReturnType visitTag(Tag* curr) { return ReturnType(); }
   ReturnType visitModule(Module* curr) { return ReturnType(); }
 
@@ -73,7 +74,7 @@ template<typename SubType, typename ReturnType = void> struct Visitor {
 // A visitor which must be overridden for each visitor that is reached.
 
 template<typename SubType, typename ReturnType = void>
-struct OverriddenVisitor {
+struct OverriddenVisitor : public Visitor<SubType, ReturnType> {
 // Expression visitors, which must be overridden
 #define DELEGATE(CLASS_TO_VISIT)                                               \
   ReturnType visit##CLASS_TO_VISIT(CLASS_TO_VISIT* curr) {                     \
@@ -85,22 +86,6 @@ struct OverriddenVisitor {
   }
 
 #include "wasm-delegations.def"
-
-  ReturnType visit(Expression* curr) {
-    assert(curr);
-
-    switch (curr->_id) {
-#define DELEGATE(CLASS_TO_VISIT)                                               \
-  case Expression::Id::CLASS_TO_VISIT##Id:                                     \
-    return static_cast<SubType*>(this)->visit##CLASS_TO_VISIT(                 \
-      static_cast<CLASS_TO_VISIT*>(curr))
-
-#include "wasm-delegations.def"
-
-      default:
-        WASM_UNREACHABLE("unexpected expression type");
-    }
-  }
 };
 
 // Visit with a single unified visitor, called on every node, instead of
@@ -204,12 +189,15 @@ struct Walker : public VisitorType {
     static_cast<SubType*>(this)->visitTable(table);
   }
 
-  void walkMemory(Memory* memory) {
-    for (auto& segment : memory->segments) {
-      if (!segment.isPassive) {
-        walk(segment.offset);
-      }
+  void walkDataSegment(DataSegment* segment) {
+    if (!segment->isPassive) {
+      walk(segment->offset);
     }
+    static_cast<SubType*>(this)->visitDataSegment(segment);
+  }
+
+  void walkMemory(Memory* memory) {
+    // TODO: This method and walkTable should walk children too, or be renamed.
     static_cast<SubType*>(this)->visitMemory(memory);
   }
 
@@ -254,11 +242,17 @@ struct Walker : public VisitorType {
     for (auto& curr : module->elementSegments) {
       self->walkElementSegment(curr.get());
     }
-    self->walkMemory(&module->memory);
+    for (auto& curr : module->memories) {
+      self->walkMemory(curr.get());
+    }
+    for (auto& curr : module->dataSegments) {
+      self->walkDataSegment(curr.get());
+    }
   }
 
   // Walks module-level code, that is, code that is not in functions.
   void walkModuleCode(Module* module) {
+    setModule(module);
     // Dispatch statically through the SubType.
     SubType* self = static_cast<SubType*>(this);
     for (auto& curr : module->globals) {
@@ -274,13 +268,19 @@ struct Walker : public VisitorType {
         self->walk(item);
       }
     }
+    for (auto& curr : module->dataSegments) {
+      if (curr->offset) {
+        self->walk(curr->offset);
+      }
+    }
+    setModule(nullptr);
   }
 
   // Walk implementation. We don't use recursion as ASTs may be highly
   // nested.
 
   // Tasks receive the this pointer and a pointer to the pointer to operate on
-  typedef void (*TaskFunc)(SubType*, Expression**);
+  using TaskFunc = void (*)(SubType*, Expression**);
 
   struct Task {
     TaskFunc func;
@@ -352,28 +352,27 @@ struct PostWalker : public Walker<SubType, VisitorType> {
 
 #define DELEGATE_START(id)                                                     \
   self->pushTask(SubType::doVisit##id, currp);                                 \
-  auto* cast = curr->cast<id>();                                               \
-  WASM_UNUSED(cast);
+  [[maybe_unused]] auto* cast = curr->cast<id>();
 
-#define DELEGATE_GET_FIELD(id, name) cast->name
+#define DELEGATE_GET_FIELD(id, field) cast->field
 
-#define DELEGATE_FIELD_CHILD(id, name)                                         \
-  self->pushTask(SubType::scan, &cast->name);
+#define DELEGATE_FIELD_CHILD(id, field)                                        \
+  self->pushTask(SubType::scan, &cast->field);
 
-#define DELEGATE_FIELD_OPTIONAL_CHILD(id, name)                                \
-  self->maybePushTask(SubType::scan, &cast->name);
+#define DELEGATE_FIELD_OPTIONAL_CHILD(id, field)                               \
+  self->maybePushTask(SubType::scan, &cast->field);
 
-#define DELEGATE_FIELD_INT(id, name)
-#define DELEGATE_FIELD_INT_ARRAY(id, name)
-#define DELEGATE_FIELD_LITERAL(id, name)
-#define DELEGATE_FIELD_NAME(id, name)
-#define DELEGATE_FIELD_NAME_VECTOR(id, name)
-#define DELEGATE_FIELD_SCOPE_NAME_DEF(id, name)
-#define DELEGATE_FIELD_SCOPE_NAME_USE(id, name)
-#define DELEGATE_FIELD_SCOPE_NAME_USE_VECTOR(id, name)
-#define DELEGATE_FIELD_SIGNATURE(id, name)
-#define DELEGATE_FIELD_TYPE(id, name)
-#define DELEGATE_FIELD_ADDRESS(id, name)
+#define DELEGATE_FIELD_INT(id, field)
+#define DELEGATE_FIELD_INT_ARRAY(id, field)
+#define DELEGATE_FIELD_LITERAL(id, field)
+#define DELEGATE_FIELD_NAME(id, field)
+#define DELEGATE_FIELD_NAME_VECTOR(id, field)
+#define DELEGATE_FIELD_SCOPE_NAME_DEF(id, field)
+#define DELEGATE_FIELD_SCOPE_NAME_USE(id, field)
+#define DELEGATE_FIELD_SCOPE_NAME_USE_VECTOR(id, field)
+#define DELEGATE_FIELD_TYPE(id, field)
+#define DELEGATE_FIELD_HEAPTYPE(id, field)
+#define DELEGATE_FIELD_ADDRESS(id, field)
 
 #include "wasm-delegations-fields.def"
   }
@@ -381,7 +380,7 @@ struct PostWalker : public Walker<SubType, VisitorType> {
 
 // Stacks of expressions tend to be limited in size (although, sometimes
 // super-nested blocks exist for br_table).
-typedef SmallVector<Expression*, 10> ExpressionStack;
+using ExpressionStack = SmallVector<Expression*, 10>;
 
 // Traversal with a control-flow stack.
 

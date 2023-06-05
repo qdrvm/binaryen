@@ -64,9 +64,9 @@ var WebAssembly = {
     };
     var atob = decodeBase64;
     // Additional imports
-    asmLibraryArg['__tempMemory__'] = 0; // risky!
+    info['env']['__tempMemory__'] = 0; // risky!
     // This will be replaced by the actual wasm2js code.
-    var exports = instantiate(asmLibraryArg, wasmMemory);
+    var exports = instantiate(info, wasmMemory);
     return {
       'exports': exports
     };
@@ -85,7 +85,7 @@ var WebAssembly = {
 
 var tempRet0 = 0;
 
-var asmLibraryArg = {
+var env = {
   log_i32: function(x) {
     console.log('[LoggingExternalInterface logging ' + literal(x, 'i32') + ']');
   },
@@ -113,7 +113,7 @@ var asmLibraryArg = {
   },
   get_i64: function(loc, index, low, high) {
     console.log('get_i64 ' + [loc, index, low, high]);
-    asmLibraryArg['setTempRet0'](high);
+    env['setTempRet0'](high);
     return low;
   },
   get_f32: function(loc, index, value) {
@@ -124,17 +124,13 @@ var asmLibraryArg = {
     console.log('get_f64 ' + [loc, index, value]);
     return value;
   },
-  get_externref: function(loc, index, value) {
-    console.log('get_externref ' + [loc, index, value]);
-    return value;
-  },
   set_i32: function(loc, index, value) {
     console.log('set_i32 ' + [loc, index, value]);
     return value;
   },
   set_i64: function(loc, index, low, high) {
     console.log('set_i64 ' + [loc, index, low, high]);
-    asmLibraryArg['setTempRet0'](high);
+    env['setTempRet0'](high);
     return low;
   },
   set_f32: function(loc, index, value) {
@@ -143,10 +139,6 @@ var asmLibraryArg = {
   },
   set_f64: function(loc, index, value) {
     console.log('set_f64 ' + [loc, index, value]);
-    return value;
-  },
-  set_externref: function(loc, index, value) {
-    console.log('set_externref ' + [loc, index, value]);
     return value;
   },
   load_ptr: function(loc, bytes, offset, ptr) {
@@ -159,7 +151,7 @@ var asmLibraryArg = {
   },
   load_val_i64: function(loc, low, high) {
     console.log('load_val_i64 ' + [loc, low, high]);
-    asmLibraryArg['setTempRet0'](high);
+    env['setTempRet0'](high);
     return low;
   },
   load_val_f32: function(loc, value) {
@@ -180,7 +172,7 @@ var asmLibraryArg = {
   },
   store_val_i64: function(loc, low, high) {
     console.log('store_val_i64 ' + [loc, low, high]);
-    asmLibraryArg['setTempRet0'](high);
+    env['setTempRet0'](high);
     return low;
   },
   store_val_f32: function(loc, value) {

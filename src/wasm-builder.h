@@ -82,7 +82,8 @@ public:
   }
 
   static std::unique_ptr<Table> makeTable(Name name,
-                                          Type type = Type::funcref,
+                                          Type type = Type(HeapType::func,
+                                                           Nullable),
                                           Address initial = 0,
                                           Address max = Table::kMaxSize) {
     auto table = std::make_unique<Table>();
@@ -97,12 +98,43 @@ public:
   makeElementSegment(Name name,
                      Name table,
                      Expression* offset = nullptr,
-                     Type type = Type::funcref) {
+                     Type type = Type(HeapType::func, Nullable)) {
     auto seg = std::make_unique<ElementSegment>();
     seg->name = name;
     seg->table = table;
     seg->offset = offset;
     seg->type = type;
+    return seg;
+  }
+
+  static std::unique_ptr<Memory> makeMemory(Name name,
+                                            Address initial = 0,
+                                            Address max = Memory::kMaxSize32,
+                                            bool shared = false,
+                                            Type indexType = Type::i32) {
+    auto memory = std::make_unique<Memory>();
+    memory->name = name;
+    memory->initial = initial;
+    memory->max = max;
+    memory->shared = shared;
+    memory->indexType = indexType;
+    return memory;
+  }
+
+  static std::unique_ptr<DataSegment>
+  makeDataSegment(Name name = "",
+                  Name memory = "",
+                  bool isPassive = false,
+                  Expression* offset = nullptr,
+                  const char* init = "",
+                  Address size = 0) {
+    auto seg = std::make_unique<DataSegment>();
+    seg->name = name;
+    seg->memory = memory;
+    seg->isPassive = isPassive;
+    seg->offset = offset;
+    seg->data.resize(size);
+    std::copy_n(init, size, seg->data.begin());
     return seg;
   }
 
@@ -135,7 +167,6 @@ public:
   }
 
   // IR nodes
-
   Nop* makeNop() { return wasm.allocator.alloc<Nop>(); }
   Block* makeBlock(Expression* first = nullptr) {
     auto* ret = wasm.allocator.alloc<Block>();
@@ -151,44 +182,47 @@ public:
     ret->finalize();
     return ret;
   }
-  Block* makeBlock(const std::vector<Expression*>& items) {
+
+  template<typename T>
+  using bool_if_not_expr_t =
+    std::enable_if_t<std::negation_v<std::is_convertible<T, Expression*>>,
+                     bool>;
+
+  template<typename T, bool_if_not_expr_t<T> = true>
+  Block* makeBlock(const T& items) {
     auto* ret = wasm.allocator.alloc<Block>();
     ret->list.set(items);
     ret->finalize();
     return ret;
   }
-  Block* makeBlock(const std::vector<Expression*>& items, Type type) {
+
+  template<typename T, bool_if_not_expr_t<T> = true>
+  Block* makeBlock(const T& items, Type type) {
     auto* ret = wasm.allocator.alloc<Block>();
     ret->list.set(items);
     ret->finalize(type);
     return ret;
   }
-  Block* makeBlock(const ExpressionList& items) {
-    auto* ret = wasm.allocator.alloc<Block>();
-    ret->list.set(items);
-    ret->finalize();
-    return ret;
-  }
-  Block* makeBlock(const ExpressionList& items, Type type) {
-    auto* ret = wasm.allocator.alloc<Block>();
-    ret->list.set(items);
-    ret->finalize(type);
-    return ret;
-  }
-  Block* makeBlock(Name name, const ExpressionList& items) {
-    auto* ret = wasm.allocator.alloc<Block>();
-    ret->name = name;
-    ret->list.set(items);
-    ret->finalize();
-    return ret;
-  }
-  Block* makeBlock(Name name, const ExpressionList& items, Type type) {
+
+  template<typename T, bool_if_not_expr_t<T> = true>
+  Block* makeBlock(Name name, const T& items, Type type) {
     auto* ret = wasm.allocator.alloc<Block>();
     ret->name = name;
     ret->list.set(items);
     ret->finalize(type);
     return ret;
   }
+  Block* makeBlock(std::initializer_list<Expression*>&& items) {
+    return makeBlock(items);
+  }
+  Block* makeBlock(std::initializer_list<Expression*>&& items, Type type) {
+    return makeBlock(items, type);
+  }
+  Block*
+  makeBlock(Name name, std::initializer_list<Expression*>&& items, Type type) {
+    return makeBlock(name, items, type);
+  }
+
   If* makeIf(Expression* condition,
              Expression* ifTrue,
              Expression* ifFalse = nullptr) {
@@ -273,12 +307,13 @@ public:
   CallIndirect* makeCallIndirect(const Name table,
                                  Expression* target,
                                  const T& args,
-                                 Signature sig,
+                                 HeapType heapType,
                                  bool isReturn = false) {
+    assert(heapType.isSignature());
     auto* call = wasm.allocator.alloc<CallIndirect>();
     call->table = table;
-    call->sig = sig;
-    call->type = sig.results;
+    call->heapType = heapType;
+    call->type = heapType.getSignature().results;
     call->target = target;
     call->operands.set(args);
     call->isReturn = isReturn;
@@ -334,10 +369,11 @@ public:
   }
   Load* makeLoad(unsigned bytes,
                  bool signed_,
-                 uint32_t offset,
+                 Address offset,
                  unsigned align,
                  Expression* ptr,
-                 Type type) {
+                 Type type,
+                 Name memory) {
     auto* ret = wasm.allocator.alloc<Load>();
     ret->isAtomic = false;
     ret->bytes = bytes;
@@ -346,11 +382,12 @@ public:
     ret->align = align;
     ret->ptr = ptr;
     ret->type = type;
+    ret->memory = memory;
     return ret;
   }
-  Load*
-  makeAtomicLoad(unsigned bytes, uint32_t offset, Expression* ptr, Type type) {
-    Load* load = makeLoad(bytes, false, offset, bytes, ptr, type);
+  Load* makeAtomicLoad(
+    unsigned bytes, Address offset, Expression* ptr, Type type, Name memory) {
+    Load* load = makeLoad(bytes, false, offset, bytes, ptr, type, memory);
     load->isAtomic = true;
     return load;
   }
@@ -358,7 +395,8 @@ public:
                              Expression* expected,
                              Expression* timeout,
                              Type expectedType,
-                             Address offset) {
+                             Address offset,
+                             Name memory) {
     auto* wait = wasm.allocator.alloc<AtomicWait>();
     wait->offset = offset;
     wait->ptr = ptr;
@@ -366,24 +404,29 @@ public:
     wait->timeout = timeout;
     wait->expectedType = expectedType;
     wait->finalize();
+    wait->memory = memory;
     return wait;
   }
-  AtomicNotify*
-  makeAtomicNotify(Expression* ptr, Expression* notifyCount, Address offset) {
+  AtomicNotify* makeAtomicNotify(Expression* ptr,
+                                 Expression* notifyCount,
+                                 Address offset,
+                                 Name memory) {
     auto* notify = wasm.allocator.alloc<AtomicNotify>();
     notify->offset = offset;
     notify->ptr = ptr;
     notify->notifyCount = notifyCount;
     notify->finalize();
+    notify->memory = memory;
     return notify;
   }
   AtomicFence* makeAtomicFence() { return wasm.allocator.alloc<AtomicFence>(); }
   Store* makeStore(unsigned bytes,
-                   uint32_t offset,
+                   Address offset,
                    unsigned align,
                    Expression* ptr,
                    Expression* value,
-                   Type type) {
+                   Type type,
+                   Name memory) {
     auto* ret = wasm.allocator.alloc<Store>();
     ret->isAtomic = false;
     ret->bytes = bytes;
@@ -392,25 +435,28 @@ public:
     ret->ptr = ptr;
     ret->value = value;
     ret->valueType = type;
+    ret->memory = memory;
     ret->finalize();
     assert(ret->value->type.isConcrete() ? ret->value->type == type : true);
     return ret;
   }
   Store* makeAtomicStore(unsigned bytes,
-                         uint32_t offset,
+                         Address offset,
                          Expression* ptr,
                          Expression* value,
-                         Type type) {
-    Store* store = makeStore(bytes, offset, bytes, ptr, value, type);
+                         Type type,
+                         Name memory) {
+    Store* store = makeStore(bytes, offset, bytes, ptr, value, type, memory);
     store->isAtomic = true;
     return store;
   }
   AtomicRMW* makeAtomicRMW(AtomicRMWOp op,
                            unsigned bytes,
-                           uint32_t offset,
+                           Address offset,
                            Expression* ptr,
                            Expression* value,
-                           Type type) {
+                           Type type,
+                           Name memory) {
     auto* ret = wasm.allocator.alloc<AtomicRMW>();
     ret->op = op;
     ret->bytes = bytes;
@@ -419,14 +465,16 @@ public:
     ret->value = value;
     ret->type = type;
     ret->finalize();
+    ret->memory = memory;
     return ret;
   }
   AtomicCmpxchg* makeAtomicCmpxchg(unsigned bytes,
-                                   uint32_t offset,
+                                   Address offset,
                                    Expression* ptr,
                                    Expression* expected,
                                    Expression* replacement,
-                                   Type type) {
+                                   Type type,
+                                   Name memory) {
     auto* ret = wasm.allocator.alloc<AtomicCmpxchg>();
     ret->bytes = bytes;
     ret->offset = offset;
@@ -435,6 +483,7 @@ public:
     ret->replacement = replacement;
     ret->type = type;
     ret->finalize();
+    ret->memory = memory;
     return ret;
   }
   SIMDExtract*
@@ -488,13 +537,17 @@ public:
     ret->finalize();
     return ret;
   }
-  SIMDLoad*
-  makeSIMDLoad(SIMDLoadOp op, Address offset, Address align, Expression* ptr) {
+  SIMDLoad* makeSIMDLoad(SIMDLoadOp op,
+                         Address offset,
+                         Address align,
+                         Expression* ptr,
+                         Name memory) {
     auto* ret = wasm.allocator.alloc<SIMDLoad>();
     ret->op = op;
     ret->offset = offset;
     ret->align = align;
     ret->ptr = ptr;
+    ret->memory = memory;
     ret->finalize();
     return ret;
   }
@@ -503,7 +556,8 @@ public:
                                            Address align,
                                            uint8_t index,
                                            Expression* ptr,
-                                           Expression* vec) {
+                                           Expression* vec,
+                                           Name memory) {
     auto* ret = wasm.allocator.alloc<SIMDLoadStoreLane>();
     ret->op = op;
     ret->offset = offset;
@@ -512,41 +566,52 @@ public:
     ret->ptr = ptr;
     ret->vec = vec;
     ret->finalize();
+    ret->memory = memory;
     return ret;
   }
-  MemoryInit* makeMemoryInit(uint32_t segment,
+  MemoryInit* makeMemoryInit(Name segment,
                              Expression* dest,
                              Expression* offset,
-                             Expression* size) {
+                             Expression* size,
+                             Name memory) {
     auto* ret = wasm.allocator.alloc<MemoryInit>();
     ret->segment = segment;
     ret->dest = dest;
     ret->offset = offset;
     ret->size = size;
+    ret->memory = memory;
     ret->finalize();
     return ret;
   }
-  DataDrop* makeDataDrop(uint32_t segment) {
+  DataDrop* makeDataDrop(Name segment) {
     auto* ret = wasm.allocator.alloc<DataDrop>();
     ret->segment = segment;
     ret->finalize();
     return ret;
   }
-  MemoryCopy*
-  makeMemoryCopy(Expression* dest, Expression* source, Expression* size) {
+  MemoryCopy* makeMemoryCopy(Expression* dest,
+                             Expression* source,
+                             Expression* size,
+                             Name destMemory,
+                             Name sourceMemory) {
     auto* ret = wasm.allocator.alloc<MemoryCopy>();
     ret->dest = dest;
     ret->source = source;
     ret->size = size;
+    ret->destMemory = destMemory;
+    ret->sourceMemory = sourceMemory;
     ret->finalize();
     return ret;
   }
-  MemoryFill*
-  makeMemoryFill(Expression* dest, Expression* value, Expression* size) {
+  MemoryFill* makeMemoryFill(Expression* dest,
+                             Expression* value,
+                             Expression* size,
+                             Name memory) {
     auto* ret = wasm.allocator.alloc<MemoryFill>();
     ret->dest = dest;
     ret->value = value;
     ret->size = size;
+    ret->memory = memory;
     ret->finalize();
     return ret;
   }
@@ -565,8 +630,8 @@ public:
     ret->finalize();
     return ret;
   }
-  Const* makeConstPtr(uint64_t val) {
-    return makeConst(Literal::makeFromInt64(val, wasm.memory.indexType));
+  Const* makeConstPtr(uint64_t val, Type indexType) {
+    return makeConst(Literal::makeFromInt64(val, indexType));
   }
   Binary* makeBinary(BinaryOp op, Expression* left, Expression* right) {
     auto* ret = wasm.allocator.alloc<Binary>();
@@ -601,36 +666,52 @@ public:
     ret->value = value;
     return ret;
   }
-  MemorySize* makeMemorySize() {
+
+  // Some APIs can be told if the memory is 32 or 64-bit. If they are not
+  // informed of that, then the memory they refer to is looked up and that
+  // information fetched from there.
+  enum MemoryInfo { Memory32, Memory64, Unspecified };
+
+  bool isMemory64(Name memoryName, MemoryInfo info) {
+    return info == MemoryInfo::Memory64 || (info == MemoryInfo::Unspecified &&
+                                            wasm.getMemory(memoryName)->is64());
+  }
+
+  MemorySize* makeMemorySize(Name memoryName,
+                             MemoryInfo info = MemoryInfo::Unspecified) {
     auto* ret = wasm.allocator.alloc<MemorySize>();
-    if (wasm.memory.is64()) {
+    if (isMemory64(memoryName, info)) {
       ret->make64();
     }
+    ret->memory = memoryName;
     ret->finalize();
     return ret;
   }
-  MemoryGrow* makeMemoryGrow(Expression* delta) {
+  MemoryGrow* makeMemoryGrow(Expression* delta,
+                             Name memoryName,
+                             MemoryInfo info = MemoryInfo::Unspecified) {
     auto* ret = wasm.allocator.alloc<MemoryGrow>();
-    if (wasm.memory.is64()) {
+    if (isMemory64(memoryName, info)) {
       ret->make64();
     }
     ret->delta = delta;
+    ret->memory = memoryName;
     ret->finalize();
     return ret;
   }
   RefNull* makeRefNull(HeapType type) {
     auto* ret = wasm.allocator.alloc<RefNull>();
-    ret->finalize(Type(type, Nullable));
+    ret->finalize(Type(type.getBottom(), Nullable));
     return ret;
   }
   RefNull* makeRefNull(Type type) {
+    assert(type.isNullable() && type.isNull());
     auto* ret = wasm.allocator.alloc<RefNull>();
     ret->finalize(type);
     return ret;
   }
-  RefIs* makeRefIs(RefIsOp op, Expression* value) {
-    auto* ret = wasm.allocator.alloc<RefIs>();
-    ret->op = op;
+  RefIsNull* makeRefIsNull(Expression* value) {
+    auto* ret = wasm.allocator.alloc<RefIsNull>();
     ret->value = value;
     ret->finalize();
     return ret;
@@ -645,6 +726,36 @@ public:
     auto* ret = wasm.allocator.alloc<RefEq>();
     ret->left = left;
     ret->right = right;
+    ret->finalize();
+    return ret;
+  }
+  TableGet* makeTableGet(Name table, Expression* index, Type type) {
+    auto* ret = wasm.allocator.alloc<TableGet>();
+    ret->table = table;
+    ret->index = index;
+    ret->type = type;
+    ret->finalize();
+    return ret;
+  }
+  TableSet* makeTableSet(Name table, Expression* index, Expression* value) {
+    auto* ret = wasm.allocator.alloc<TableSet>();
+    ret->table = table;
+    ret->index = index;
+    ret->value = value;
+    ret->finalize();
+    return ret;
+  }
+  TableSize* makeTableSize(Name table) {
+    auto* ret = wasm.allocator.alloc<TableSize>();
+    ret->table = table;
+    ret->finalize();
+    return ret;
+  }
+  TableGrow* makeTableGrow(Name table, Expression* value, Expression* delta) {
+    auto* ret = wasm.allocator.alloc<TableGrow>();
+    ret->table = table;
+    ret->value = value;
+    ret->delta = delta;
     ret->finalize();
     return ret;
   }
@@ -758,58 +869,35 @@ public:
     ret->finalize();
     return ret;
   }
-  RefTest* makeRefTest(Expression* ref, Expression* rtt) {
+  RefTest* makeRefTest(Expression* ref, Type castType) {
     auto* ret = wasm.allocator.alloc<RefTest>();
     ret->ref = ref;
-    ret->rtt = rtt;
+    ret->castType = castType;
     ret->finalize();
     return ret;
   }
-  RefCast* makeRefCast(Expression* ref, Expression* rtt) {
+  RefCast* makeRefCast(Expression* ref, Type type, RefCast::Safety safety) {
     auto* ret = wasm.allocator.alloc<RefCast>();
     ret->ref = ref;
-    ret->rtt = rtt;
+    ret->type = type;
+    ret->safety = safety;
     ret->finalize();
     return ret;
   }
   BrOn*
-  makeBrOn(BrOnOp op, Name name, Expression* ref, Expression* rtt = nullptr) {
+  makeBrOn(BrOnOp op, Name name, Expression* ref, Type castType = Type::none) {
     auto* ret = wasm.allocator.alloc<BrOn>();
     ret->op = op;
     ret->name = name;
     ret->ref = ref;
-    ret->rtt = rtt;
+    ret->castType = castType;
     ret->finalize();
     return ret;
   }
-  RttCanon* makeRttCanon(HeapType heapType) {
-    auto* ret = wasm.allocator.alloc<RttCanon>();
-    ret->type = Type(Rtt(0, heapType));
-    ret->finalize();
-    return ret;
-  }
-  RttSub* makeRttSub(HeapType heapType, Expression* parent) {
-    auto* ret = wasm.allocator.alloc<RttSub>();
-    ret->parent = parent;
-    auto parentRtt = parent->type.getRtt();
-    if (parentRtt.hasDepth()) {
-      ret->type = Type(Rtt(parentRtt.depth + 1, heapType));
-    } else {
-      ret->type = Type(Rtt(heapType));
-    }
-    ret->finalize();
-    return ret;
-  }
-  RttSub* makeRttFreshSub(HeapType heapType, Expression* parent) {
-    auto* ret = makeRttSub(heapType, parent);
-    ret->fresh = true;
-    return ret;
-  }
-  template<typename T>
-  StructNew* makeStructNew(Expression* rtt, const T& args) {
+  template<typename T> StructNew* makeStructNew(HeapType type, const T& args) {
     auto* ret = wasm.allocator.alloc<StructNew>();
-    ret->rtt = rtt;
     ret->operands.set(args);
+    ret->type = Type(type, NonNullable);
     ret->finalize();
     return ret;
   }
@@ -832,19 +920,54 @@ public:
     return ret;
   }
   ArrayNew*
-  makeArrayNew(Expression* rtt, Expression* size, Expression* init = nullptr) {
+  makeArrayNew(HeapType type, Expression* size, Expression* init = nullptr) {
     auto* ret = wasm.allocator.alloc<ArrayNew>();
-    ret->rtt = rtt;
     ret->size = size;
     ret->init = init;
+    ret->type = Type(type, NonNullable);
     ret->finalize();
     return ret;
   }
-  ArrayGet*
-  makeArrayGet(Expression* ref, Expression* index, bool signed_ = false) {
+  ArrayNewData* makeArrayNewData(HeapType type,
+                                 Name seg,
+                                 Expression* offset,
+                                 Expression* size) {
+    auto* ret = wasm.allocator.alloc<ArrayNewData>();
+    ret->segment = seg;
+    ret->offset = offset;
+    ret->size = size;
+    ret->type = Type(type, NonNullable);
+    ret->finalize();
+    return ret;
+  }
+  ArrayNewElem* makeArrayNewElem(HeapType type,
+                                 Name seg,
+                                 Expression* offset,
+                                 Expression* size) {
+    auto* ret = wasm.allocator.alloc<ArrayNewElem>();
+    ret->segment = seg;
+    ret->offset = offset;
+    ret->size = size;
+    ret->type = Type(type, NonNullable);
+    ret->finalize();
+    return ret;
+  }
+  ArrayNewFixed* makeArrayNewFixed(HeapType type,
+                                   const std::vector<Expression*>& values) {
+    auto* ret = wasm.allocator.alloc<ArrayNewFixed>();
+    ret->values.set(values);
+    ret->type = Type(type, NonNullable);
+    ret->finalize();
+    return ret;
+  }
+  ArrayGet* makeArrayGet(Expression* ref,
+                         Expression* index,
+                         Type type,
+                         bool signed_ = false) {
     auto* ret = wasm.allocator.alloc<ArrayGet>();
     ret->ref = ref;
     ret->index = index;
+    ret->type = type;
     ret->signed_ = signed_;
     ret->finalize();
     return ret;
@@ -878,10 +1001,173 @@ public:
     ret->finalize();
     return ret;
   }
+  ArrayFill* makeArrayFill(Expression* ref,
+                           Expression* index,
+                           Expression* value,
+                           Expression* size) {
+    auto* ret = wasm.allocator.alloc<ArrayFill>();
+    ret->ref = ref;
+    ret->index = index;
+    ret->value = value;
+    ret->size = size;
+    ret->finalize();
+    return ret;
+  }
+  ArrayInitData* makeArrayInitData(Name seg,
+                                   Expression* ref,
+                                   Expression* index,
+                                   Expression* offset,
+                                   Expression* size) {
+    auto* ret = wasm.allocator.alloc<ArrayInitData>();
+    ret->segment = seg;
+    ret->ref = ref;
+    ret->index = index;
+    ret->offset = offset;
+    ret->size = size;
+    ret->finalize();
+    return ret;
+  }
+  ArrayInitElem* makeArrayInitElem(Name seg,
+                                   Expression* ref,
+                                   Expression* index,
+                                   Expression* offset,
+                                   Expression* size) {
+    auto* ret = wasm.allocator.alloc<ArrayInitElem>();
+    ret->segment = seg;
+    ret->ref = ref;
+    ret->index = index;
+    ret->offset = offset;
+    ret->size = size;
+    ret->finalize();
+    return ret;
+  }
   RefAs* makeRefAs(RefAsOp op, Expression* value) {
     auto* ret = wasm.allocator.alloc<RefAs>();
     ret->op = op;
     ret->value = value;
+    ret->finalize();
+    return ret;
+  }
+  StringNew* makeStringNew(StringNewOp op,
+                           Expression* ptr,
+                           Expression* length,
+                           bool try_) {
+    auto* ret = wasm.allocator.alloc<StringNew>();
+    ret->op = op;
+    ret->ptr = ptr;
+    ret->length = length;
+    ret->try_ = try_;
+    ret->finalize();
+    return ret;
+  }
+  StringNew* makeStringNew(StringNewOp op,
+                           Expression* ptr,
+                           Expression* start,
+                           Expression* end,
+                           bool try_) {
+    auto* ret = wasm.allocator.alloc<StringNew>();
+    ret->op = op;
+    ret->ptr = ptr;
+    ret->start = start;
+    ret->end = end;
+    ret->try_ = try_;
+    ret->finalize();
+    return ret;
+  }
+  StringConst* makeStringConst(Name string) {
+    auto* ret = wasm.allocator.alloc<StringConst>();
+    ret->string = string;
+    ret->finalize();
+    return ret;
+  }
+  StringMeasure* makeStringMeasure(StringMeasureOp op, Expression* ref) {
+    auto* ret = wasm.allocator.alloc<StringMeasure>();
+    ret->op = op;
+    ret->ref = ref;
+    ret->finalize();
+    return ret;
+  }
+  StringEncode* makeStringEncode(StringEncodeOp op,
+                                 Expression* ref,
+                                 Expression* ptr,
+                                 Expression* start = nullptr) {
+    auto* ret = wasm.allocator.alloc<StringEncode>();
+    ret->op = op;
+    ret->ref = ref;
+    ret->ptr = ptr;
+    ret->start = start;
+    ret->finalize();
+    return ret;
+  }
+  StringConcat* makeStringConcat(Expression* left, Expression* right) {
+    auto* ret = wasm.allocator.alloc<StringConcat>();
+    ret->left = left;
+    ret->right = right;
+    ret->finalize();
+    return ret;
+  }
+  StringEq* makeStringEq(StringEqOp op, Expression* left, Expression* right) {
+    auto* ret = wasm.allocator.alloc<StringEq>();
+    ret->op = op;
+    ret->left = left;
+    ret->right = right;
+    ret->finalize();
+    return ret;
+  }
+  StringAs* makeStringAs(StringAsOp op, Expression* ref) {
+    auto* ret = wasm.allocator.alloc<StringAs>();
+    ret->op = op;
+    ret->ref = ref;
+    ret->finalize();
+    return ret;
+  }
+  StringWTF8Advance*
+  makeStringWTF8Advance(Expression* ref, Expression* pos, Expression* bytes) {
+    auto* ret = wasm.allocator.alloc<StringWTF8Advance>();
+    ret->ref = ref;
+    ret->pos = pos;
+    ret->bytes = bytes;
+    ret->finalize();
+    return ret;
+  }
+  StringWTF16Get* makeStringWTF16Get(Expression* ref, Expression* pos) {
+    auto* ret = wasm.allocator.alloc<StringWTF16Get>();
+    ret->ref = ref;
+    ret->pos = pos;
+    ret->finalize();
+    return ret;
+  }
+  StringIterNext* makeStringIterNext(Expression* ref) {
+    auto* ret = wasm.allocator.alloc<StringIterNext>();
+    ret->ref = ref;
+    ret->finalize();
+    return ret;
+  }
+  StringIterMove*
+  makeStringIterMove(StringIterMoveOp op, Expression* ref, Expression* num) {
+    auto* ret = wasm.allocator.alloc<StringIterMove>();
+    ret->op = op;
+    ret->ref = ref;
+    ret->num = num;
+    ret->finalize();
+    return ret;
+  }
+  StringSliceWTF* makeStringSliceWTF(StringSliceWTFOp op,
+                                     Expression* ref,
+                                     Expression* start,
+                                     Expression* end) {
+    auto* ret = wasm.allocator.alloc<StringSliceWTF>();
+    ret->op = op;
+    ret->ref = ref;
+    ret->start = start;
+    ret->end = end;
+    ret->finalize();
+    return ret;
+  }
+  StringSliceIter* makeStringSliceIter(Expression* ref, Expression* num) {
+    auto* ret = wasm.allocator.alloc<StringSliceIter>();
+    ret->ref = ref;
+    ret->num = num;
     ret->finalize();
     return ret;
   }
@@ -908,21 +1194,23 @@ public:
     if (type.isFunction()) {
       return makeRefFunc(value.getFunc(), type.getHeapType());
     }
-    if (type.isRtt()) {
-      return makeRtt(value.type);
+    if (type.isRef() && type.getHeapType() == HeapType::i31) {
+      return makeI31New(makeConst(value.geti31()));
+    }
+    if (type.isString()) {
+      // TODO: more than ascii support
+      std::string string;
+      for (auto c : value.getGCData()->values) {
+        string.push_back(c.getInteger());
+      }
+      return makeStringConst(string);
+    }
+    if (type.isRef() && type.getHeapType() == HeapType::ext) {
+      return makeRefAs(ExternExternalize,
+                       makeConstantExpression(value.internalize()));
     }
     TODO_SINGLE_COMPOUND(type);
-    switch (type.getBasic()) {
-      case Type::externref:
-      case Type::anyref:
-      case Type::eqref:
-        assert(value.isNull() && "unexpected non-null reference type literal");
-        return makeRefNull(type);
-      case Type::i31ref:
-        return makeI31New(makeConst(value.geti31()));
-      default:
-        WASM_UNREACHABLE("invalid constant expression");
-    }
+    WASM_UNREACHABLE("unsupported constant expression");
   }
 
   Expression* makeConstantExpression(Literals values) {
@@ -936,18 +1224,6 @@ public:
       }
       return makeTupleMake(consts);
     }
-  }
-
-  // Given a type, creates an RTT expression of that type, using a combination
-  // of rtt.canon and rtt.subs.
-  Expression* makeRtt(Type type) {
-    Expression* ret = makeRttCanon(type.getHeapType());
-    if (type.getRtt().hasDepth()) {
-      for (Index i = 0; i < type.getRtt().depth; i++) {
-        ret = makeRttSub(type.getHeapType(), ret);
-      }
-    }
-    return ret;
   }
 
   // Additional utility functions for building on top of nodes
@@ -1062,13 +1338,21 @@ public:
   // Returns a replacement with the precise same type, and with minimal contents
   // as best we can. As a replacement, this may reuse the input node.
   template<typename T> Expression* replaceWithIdenticalType(T* curr) {
-    if (curr->type.isTuple()) {
+    if (curr->type.isTuple() && curr->type.isDefaultable()) {
       return makeConstantExpression(Literal::makeZeros(curr->type));
     }
-    if (curr->type.isNullable()) {
+    if (curr->type.isNullable() && curr->type.isNull()) {
       return ExpressionManipulator::refNull(curr, curr->type);
     }
-    if (curr->type.isFunction() || !curr->type.isBasic()) {
+    if (curr->type.isRef() && curr->type.getHeapType() == HeapType::i31) {
+      Expression* ret = makeI31New(makeConst(0));
+      if (curr->type.isNullable()) {
+        // To keep the type identical, wrap it in a block that adds nullability.
+        ret = makeBlock({ret}, curr->type);
+      }
+      return ret;
+    }
+    if (!curr->type.isBasic()) {
       // We can't do any better, keep the original.
       return curr;
     }
@@ -1093,81 +1377,12 @@ public:
         value = Literal(bytes.data());
         break;
       }
-      case Type::funcref:
-        WASM_UNREACHABLE("handled above");
-      case Type::externref:
-      case Type::anyref:
-      case Type::eqref:
-        return ExpressionManipulator::refNull(curr, curr->type);
-      case Type::i31ref:
-        return makeI31New(makeConst(0));
-      case Type::dataref:
-        return curr;
       case Type::none:
         return ExpressionManipulator::nop(curr);
       case Type::unreachable:
         return ExpressionManipulator::unreachable(curr);
     }
     return makeConst(value);
-  }
-};
-
-// This class adds methods that first inspect the input. They may not have fully
-// comprehensive error checking, when that can be left to the validator; the
-// benefit of the validate* methods is that they can share code between the
-// text and binary format parsers, for handling certain situations in the
-// input which preclude even creating valid IR, which the validator depends
-// on.
-class ValidatingBuilder : public Builder {
-  size_t line = -1, col = -1;
-
-public:
-  ValidatingBuilder(Module& wasm, size_t line) : Builder(wasm), line(line) {}
-  ValidatingBuilder(Module& wasm, size_t line, size_t col)
-    : Builder(wasm), line(line), col(col) {}
-
-  Expression* validateAndMakeBrOn(BrOnOp op,
-                                  Name name,
-                                  Expression* ref,
-                                  Expression* rtt = nullptr) {
-    if (op == BrOnCast) {
-      if (rtt->type == Type::unreachable) {
-        // An unreachable rtt is not supported: the text and binary formats do
-        // not provide the type, so if it's unreachable we should not even
-        // create a br_on_cast in such a case, as we'd have no idea what it
-        // casts to.
-        return makeSequence(makeDrop(ref), rtt);
-      }
-    }
-    if (op == BrOnNull) {
-      if (!ref->type.isRef() && ref->type != Type::unreachable) {
-        throw ParseException("Invalid ref for br_on_null", line, col);
-      }
-    }
-    return makeBrOn(op, name, ref, rtt);
-  }
-
-  template<typename T>
-  Expression* validateAndMakeCallRef(Expression* target,
-                                     const T& args,
-                                     bool isReturn = false) {
-    if (!target->type.isRef()) {
-      if (target->type == Type::unreachable) {
-        // An unreachable target is not supported. Similiar to br_on_cast, just
-        // emit an unreachable sequence, since we don't have enough information
-        // to create a full call_ref.
-        auto* block = makeBlock(args);
-        block->list.push_back(target);
-        block->finalize(Type::unreachable);
-        return block;
-      }
-      throw ParseException("Non-reference type for a call_ref", line, col);
-    }
-    auto heapType = target->type.getHeapType();
-    if (!heapType.isSignature()) {
-      throw ParseException("Invalid reference type for a call_ref", line, col);
-    }
-    return makeCallRef(target, args, heapType.getSignature().results, isReturn);
   }
 };
 

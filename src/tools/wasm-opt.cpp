@@ -59,9 +59,10 @@ static std::string runCommand(std::string command) {
 #endif
 }
 
-static bool willRemoveDebugInfo(const std::vector<std::string>& passes) {
+static bool
+willRemoveDebugInfo(const std::vector<OptimizationOptions::PassInfo>& passes) {
   for (auto& pass : passes) {
-    if (PassRunner::passRemovesDebugInfo(pass)) {
+    if (PassRunner::passRemovesDebugInfo(pass.name)) {
       return true;
     }
   }
@@ -91,11 +92,14 @@ int main(int argc, const char* argv[]) {
   std::string outputSourceMapFilename;
   std::string outputSourceMapUrl;
 
+  const std::string WasmOptOption = "wasm-opt options";
+
   OptimizationOptions options("wasm-opt", "Read, write, and optimize files");
   options
     .add("--output",
          "-o",
          "Output file (stdout if not specified)",
+         WasmOptOption,
          Options::Arguments::One,
          [](Options* o, const std::string& argument) {
            o->extra["output"] = argument;
@@ -104,23 +108,27 @@ int main(int argc, const char* argv[]) {
     .add("--emit-text",
          "-S",
          "Emit text instead of binary for the output file",
+         WasmOptOption,
          Options::Arguments::Zero,
          [&](Options* o, const std::string& argument) { emitBinary = false; })
     .add("--converge",
          "-c",
          "Run passes to convergence, continuing while binary size decreases",
+         WasmOptOption,
          Options::Arguments::Zero,
          [&](Options* o, const std::string& arguments) { converge = true; })
     .add(
       "--fuzz-exec-before",
       "-feh",
       "Execute functions before optimization, helping fuzzing find bugs",
+      WasmOptOption,
       Options::Arguments::Zero,
       [&](Options* o, const std::string& arguments) { fuzzExecBefore = true; })
     .add("--fuzz-exec",
          "-fe",
          "Execute functions before and after optimization, helping fuzzing "
          "find bugs",
+         WasmOptOption,
          Options::Arguments::Zero,
          [&](Options* o, const std::string& arguments) {
            fuzzExecBefore = fuzzExecAfter = true;
@@ -130,6 +138,7 @@ int main(int argc, const char* argv[]) {
          "An extra command to run on the output before and after optimizing. "
          "The output is compared between the two, and an error occurs if they "
          "are not equal",
+         WasmOptOption,
          Options::Arguments::One,
          [&](Options* o, const std::string& arguments) {
            extraFuzzCommand = arguments;
@@ -139,11 +148,13 @@ int main(int argc, const char* argv[]) {
       "-ttf",
       "Translate the input into a valid wasm module *somehow*, useful for "
       "fuzzing",
+      WasmOptOption,
       Options::Arguments::Zero,
       [&](Options* o, const std::string& arguments) { translateToFuzz = true; })
     .add("--initial-fuzz",
          "-if",
          "Initial wasm content in translate-to-fuzz (-ttf) mode",
+         WasmOptOption,
          Options::Arguments::One,
          [&initialFuzz](Options* o, const std::string& argument) {
            initialFuzz = argument;
@@ -152,22 +163,26 @@ int main(int argc, const char* argv[]) {
          "-fp",
          "Pick a random set of passes to run, useful for fuzzing. this depends "
          "on translate-to-fuzz (it picks the passes from the input)",
+         WasmOptOption,
          Options::Arguments::Zero,
          [&](Options* o, const std::string& arguments) { fuzzPasses = true; })
     .add("--no-fuzz-memory",
          "",
          "don't emit memory ops when fuzzing",
+         WasmOptOption,
          Options::Arguments::Zero,
          [&](Options* o, const std::string& arguments) { fuzzMemory = false; })
     .add("--no-fuzz-oob",
          "",
          "don't emit out-of-bounds loads/stores/indirect calls when fuzzing",
+         WasmOptOption,
          Options::Arguments::Zero,
          [&](Options* o, const std::string& arguments) { fuzzOOB = false; })
     .add("--emit-js-wrapper",
          "-ejw",
          "Emit a JavaScript wrapper file that can run the wasm with some test "
          "values, useful for fuzzing",
+         WasmOptOption,
          Options::Arguments::One,
          [&](Options* o, const std::string& arguments) {
            emitJSWrapper = arguments;
@@ -176,6 +191,7 @@ int main(int argc, const char* argv[]) {
          "-esw",
          "Emit a wasm spec interpreter wrapper file that can run the wasm with "
          "some test values, useful for fuzzing",
+         WasmOptOption,
          Options::Arguments::One,
          [&](Options* o, const std::string& arguments) {
            emitSpecWrapper = arguments;
@@ -184,6 +200,7 @@ int main(int argc, const char* argv[]) {
          "-esw",
          "Emit a C wrapper file that can run the wasm after it is compiled "
          "with wasm2c, useful for fuzzing",
+         WasmOptOption,
          Options::Arguments::One,
          [&](Options* o, const std::string& arguments) {
            emitWasm2CWrapper = arguments;
@@ -191,6 +208,7 @@ int main(int argc, const char* argv[]) {
     .add("--input-source-map",
          "-ism",
          "Consume source map from the specified file",
+         WasmOptOption,
          Options::Arguments::One,
          [&inputSourceMapFilename](Options* o, const std::string& argument) {
            inputSourceMapFilename = argument;
@@ -198,6 +216,7 @@ int main(int argc, const char* argv[]) {
     .add("--output-source-map",
          "-osm",
          "Emit source map to the specified file",
+         WasmOptOption,
          Options::Arguments::One,
          [&outputSourceMapFilename](Options* o, const std::string& argument) {
            outputSourceMapFilename = argument;
@@ -205,10 +224,17 @@ int main(int argc, const char* argv[]) {
     .add("--output-source-map-url",
          "-osu",
          "Emit specified string as source map URL",
+         WasmOptOption,
          Options::Arguments::One,
          [&outputSourceMapUrl](Options* o, const std::string& argument) {
            outputSourceMapUrl = argument;
          })
+    .add("--new-wat-parser",
+         "",
+         "Use the experimental new WAT parser",
+         WasmOptOption,
+         Options::Arguments::Zero,
+         [](Options*, const std::string&) { useNewWATParser = true; })
     .add_positional("INFILE",
                     Options::Arguments::One,
                     [](Options* o, const std::string& argument) {
@@ -225,8 +251,11 @@ int main(int argc, const char* argv[]) {
     // If the user asked to print the module, print it even if invalid,
     // as otherwise there is no way to print the broken module (the pass
     // to print would not be reached).
-    if (std::find(options.passes.begin(), options.passes.end(), "print") !=
-        options.passes.end()) {
+    if (std::any_of(options.passes.begin(),
+                    options.passes.end(),
+                    [](const OptimizationOptions::PassInfo& info) {
+                      return info.name == "print";
+                    })) {
       std::cout << wasm << '\n';
     }
     Fatal() << message;
@@ -250,7 +279,12 @@ int main(int argc, const char* argv[]) {
     } catch (ParseException& p) {
       p.dump(std::cerr);
       std::cerr << '\n';
-      Fatal() << "error parsing wasm";
+      if (options.debug) {
+        Fatal() << "error parsing wasm. here is what we read up to the error:\n"
+                << wasm;
+      } else {
+        Fatal() << "error parsing wasm (try --debug for more info)";
+      }
     } catch (MapParseException& p) {
       p.dump(std::cerr);
       std::cerr << '\n';
@@ -261,7 +295,7 @@ int main(int argc, const char* argv[]) {
     }
 
     if (options.passOptions.validate) {
-      if (!WasmValidator().validate(wasm)) {
+      if (!WasmValidator().validate(wasm, options.passOptions)) {
         exitOnInvalidWasm("error validating input");
       }
     }
@@ -275,7 +309,7 @@ int main(int argc, const char* argv[]) {
     reader.setAllowOOB(fuzzOOB);
     reader.build();
     if (options.passOptions.validate) {
-      if (!WasmValidator().validate(wasm)) {
+      if (!WasmValidator().validate(wasm, options.passOptions)) {
         std::cout << wasm << '\n';
         Fatal() << "error after translate-to-fuzz";
       }
@@ -334,7 +368,7 @@ int main(int argc, const char* argv[]) {
     auto runPasses = [&]() {
       options.runPasses(wasm);
       if (options.passOptions.validate) {
-        bool valid = WasmValidator().validate(wasm);
+        bool valid = WasmValidator().validate(wasm, options.passOptions);
         if (!valid) {
           exitOnInvalidWasm("error after opts");
         }

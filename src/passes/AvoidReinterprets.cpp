@@ -40,7 +40,7 @@ static bool canReplaceWithReinterpret(Load* load) {
 static Load* getSingleLoad(LocalGraph* localGraph,
                            LocalGet* get,
                            const PassOptions& passOptions,
-                           FeatureSet features) {
+                           Module& module) {
   std::set<LocalGet*> seen;
   seen.insert(get);
   while (1) {
@@ -52,15 +52,14 @@ static Load* getSingleLoad(LocalGraph* localGraph,
     if (!set) {
       return nullptr;
     }
-    auto* value = Properties::getFallthrough(set->value, passOptions, features);
+    auto* value = Properties::getFallthrough(set->value, passOptions, module);
     if (auto* parentGet = value->dynCast<LocalGet>()) {
-      if (seen.count(parentGet)) {
-        // We are in a cycle of gets, in unreachable code.
-        return nullptr;
+      if (seen.emplace(parentGet).second) {
+        get = parentGet;
+        continue;
       }
-      get = parentGet;
-      seen.insert(get);
-      continue;
+      // We are in a cycle of gets, in unreachable code.
+      return nullptr;
     }
     if (auto* load = value->dynCast<Load>()) {
       return load;
@@ -77,7 +76,9 @@ static bool isReinterpret(Unary* curr) {
 struct AvoidReinterprets : public WalkerPass<PostWalker<AvoidReinterprets>> {
   bool isFunctionParallel() override { return true; }
 
-  Pass* create() override { return new AvoidReinterprets; }
+  std::unique_ptr<Pass> create() override {
+    return std::make_unique<AvoidReinterprets>();
+  }
 
   struct Info {
     // Info used when analyzing.
@@ -102,12 +103,11 @@ struct AvoidReinterprets : public WalkerPass<PostWalker<AvoidReinterprets>> {
 
   void visitUnary(Unary* curr) {
     if (isReinterpret(curr)) {
-      FeatureSet features = getModule()->features;
-      if (auto* get =
-            Properties::getFallthrough(curr->value, getPassOptions(), features)
-              ->dynCast<LocalGet>()) {
+      if (auto* get = Properties::getFallthrough(
+                        curr->value, getPassOptions(), *getModule())
+                        ->dynCast<LocalGet>()) {
         if (auto* load =
-              getSingleLoad(localGraph, get, getPassOptions(), features)) {
+              getSingleLoad(localGraph, get, getPassOptions(), *getModule())) {
           auto& info = infos[load];
           info.reinterpreted = true;
         }
@@ -117,13 +117,11 @@ struct AvoidReinterprets : public WalkerPass<PostWalker<AvoidReinterprets>> {
 
   void optimize(Function* func) {
     std::set<Load*> unoptimizables;
-    auto indexType = getModule()->memory.indexType;
-    for (auto& pair : infos) {
-      auto* load = pair.first;
-      auto& info = pair.second;
+    for (auto& [load, info] : infos) {
       if (info.reinterpreted && canReplaceWithReinterpret(load)) {
         // We should use another load here, to avoid reinterprets.
-        info.ptrLocal = Builder::addVar(func, indexType);
+        auto mem = getModule()->getMemory(load->memory);
+        info.ptrLocal = Builder::addVar(func, mem->indexType);
         info.reinterpretedLocal =
           Builder::addVar(func, load->type.reinterpret());
       } else {
@@ -156,8 +154,8 @@ struct AvoidReinterprets : public WalkerPass<PostWalker<AvoidReinterprets>> {
               replaceCurrent(makeReinterpretedLoad(load, load->ptr));
             }
           } else if (auto* get = value->dynCast<LocalGet>()) {
-            if (auto* load = getSingleLoad(
-                  localGraph, get, passOptions, module->features)) {
+            if (auto* load =
+                  getSingleLoad(localGraph, get, passOptions, *module)) {
               auto iter = infos.find(load);
               if (iter != infos.end()) {
                 auto& info = iter->second;
@@ -177,7 +175,8 @@ struct AvoidReinterprets : public WalkerPass<PostWalker<AvoidReinterprets>> {
           auto& info = iter->second;
           Builder builder(*module);
           auto* ptr = curr->ptr;
-          auto indexType = getModule()->memory.indexType;
+          auto mem = getModule()->getMemory(curr->memory);
+          auto indexType = mem->indexType;
           curr->ptr = builder.makeLocalGet(info.ptrLocal, indexType);
           // Note that the other load can have its sign set to false - if the
           // original were an integer, the other is a float anyhow; and if
@@ -199,7 +198,8 @@ struct AvoidReinterprets : public WalkerPass<PostWalker<AvoidReinterprets>> {
                                 load->offset,
                                 load->align,
                                 ptr,
-                                load->type.reinterpret());
+                                load->type.reinterpret(),
+                                load->memory);
       }
     } finalOptimizer(infos, localGraph, getModule(), getPassOptions());
 

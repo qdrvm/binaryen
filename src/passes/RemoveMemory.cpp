@@ -24,8 +24,8 @@
 namespace wasm {
 
 struct RemoveMemory : public Pass {
-  void run(PassRunner* runner, Module* module) override {
-    module->memory.segments.clear();
+  void run(Module* module) override {
+    module->removeDataSegments([&](DataSegment* curr) { return true; });
   }
 };
 

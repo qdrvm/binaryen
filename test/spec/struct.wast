@@ -1,12 +1,15 @@
 ;; Binding structure
 
 (module
-  (type $s0 (struct (field (ref 0) (ref 1) (ref $s0) (ref $s1))))
-  (type $s1 (struct (field (ref 0) (ref 1) (ref $s0) (ref $s1))))
+  (rec
+    (type $s0 (struct (field (ref 0) (ref 1) (ref $s0) (ref $s1))))
+    (type $s1 (struct (field (ref 0) (ref 1) (ref $s0) (ref $s1))))
+  )
 
-  (func (param (ref $forward)))
-
-  (type $forward (struct))
+  (rec
+    (func (param (ref $forward)))
+    (type $forward (struct))
+  )
 )
 
 (assert_invalid
@@ -28,7 +31,7 @@
     (struct.get $vec 0 (local.get $v))
   )
   (func (export "get_0") (result f32)
-    (call $get_0 (struct.new_default_with_rtt $vec (rtt.canon $vec)))
+    (call $get_0 (struct.new_default $vec))
   )
 
   (func $set_get_y (param $v (ref $vec)) (param $y f32) (result f32)
@@ -36,7 +39,7 @@
     (struct.get $vec $y (local.get $v))
   )
   (func (export "set_get_y") (param $y f32) (result f32)
-    (call $set_get_y (struct.new_default_with_rtt $vec (rtt.canon $vec)) (local.get $y))
+    (call $set_get_y (struct.new_default $vec) (local.get $y))
   )
 
   (func $set_get_1 (param $v (ref $vec)) (param $y f32) (result f32)
@@ -44,7 +47,7 @@
     (struct.get $vec $y (local.get $v))
   )
   (func (export "set_get_1") (param $y f32) (result f32)
-    (call $set_get_1 (struct.new_default_with_rtt $vec (rtt.canon $vec)) (local.get $y))
+    (call $set_get_1 (struct.new_default $vec) (local.get $y))
   )
 )
 
@@ -82,28 +85,11 @@
   (module
     (type $t (struct (field i32) (field (mut i32))))
     (func (export "struct.new-null")
-      (local (ref null (rtt $t))) (drop (struct.new $t (i32.const 1) (i32.const 2) (local.get 0)))
+      (local i64)
+      (drop (struct.new $t (i32.const 1) (i32.const 2) (local.get 0)))
     )
   )
   "type mismatch"
-)
-(assert_invalid
-  (module
-    (type $t (struct (field i32) (field (mut i32))))
-    (func (export "struct.new_default-null")
-      (local (ref null (rtt $t))) (drop (struct.new_default_with_rtt $t (local.get 0)))
-    )
-  )
-  "type mismatch"
-)
-
-(assert_invalid
-  (module
-    (type $A (struct (field i32)))
-    (type $B (struct (field i64)))
-    (global $glob (rtt $A) (rtt.sub $A (rtt.canon $B)))
-  )
-  "invalid rtt"
 )
 
 (assert_invalid
@@ -112,7 +98,7 @@
     (func $test
       (drop
         ;; too many arguments
-        (struct.new_with_rtt $vec (i32.const 1) (i32.const 2) (rtt.canon $vec))
+        (struct.new $vec (i32.const 1) (i32.const 2))
       )
     )
   )
@@ -125,7 +111,7 @@
     (func $test
       (drop
         ;; too few arguments
-        (struct.new_with_rtt $vec (i32.const 1) (rtt.canon $vec))
+        (struct.new $vec (i32.const 1))
       )
     )
   )

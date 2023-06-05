@@ -24,11 +24,13 @@
 
 #include "tool-options.h"
 
-using namespace cashew;
 using namespace wasm;
 
 int main(int argc, const char* argv[]) {
   std::string sourceMapFilename;
+
+  const std::string WasmDisOption = "wasm-dis options";
+
   ToolOptions options("wasm-dis",
                       "Un-assemble a .wasm (WebAssembly binary format) into a "
                       ".wat (WebAssembly text format)");
@@ -36,6 +38,7 @@ int main(int argc, const char* argv[]) {
     .add("--output",
          "-o",
          "Output file (stdout if not specified)",
+         WasmDisOption,
          Options::Arguments::One,
          [](Options* o, const std::string& argument) {
            o->extra["output"] = argument;
@@ -45,6 +48,7 @@ int main(int argc, const char* argv[]) {
       "--source-map",
       "-sm",
       "Consume source map from the specified file to add location information",
+      WasmDisOption,
       Options::Arguments::One,
       [&sourceMapFilename](Options* o, const std::string& argument) {
         sourceMapFilename = argument;
@@ -66,7 +70,12 @@ int main(int argc, const char* argv[]) {
   } catch (ParseException& p) {
     p.dump(std::cerr);
     std::cerr << '\n';
-    Fatal() << "error in parsing wasm binary";
+    if (options.debug) {
+      Fatal() << "error parsing wasm. here is what we read up to the error:\n"
+              << wasm;
+    } else {
+      Fatal() << "error parsing wasm (try --debug for more info)";
+    }
   } catch (MapParseException& p) {
     p.dump(std::cerr);
     std::cerr << '\n';

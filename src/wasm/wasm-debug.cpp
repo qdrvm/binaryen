@@ -29,14 +29,12 @@ std::error_code dwarf2yaml(llvm::DWARFContext& DCtx, llvm::DWARFYAML::Data& Y);
 #include "wasm-debug.h"
 #include "wasm.h"
 
-namespace wasm {
-
-namespace Debug {
+namespace wasm::Debug {
 
 bool isDWARFSection(Name name) { return name.startsWith(".debug_"); }
 
 bool hasDWARFSections(const Module& wasm) {
-  for (auto& section : wasm.userSections) {
+  for (auto& section : wasm.customSections) {
     if (isDWARFSection(section.name)) {
       return true;
     }
@@ -55,7 +53,7 @@ struct BinaryenDWARFInfo {
 
   BinaryenDWARFInfo(const Module& wasm) {
     // Get debug sections from the wasm.
-    for (auto& section : wasm.userSections) {
+    for (auto& section : wasm.customSections) {
       if (Name(section.name).startsWith(".debug_") && section.data.data()) {
         // TODO: efficiency
         sections[section.name.substr(1)] = llvm::MemoryBuffer::getMemBufferCopy(
@@ -66,6 +64,10 @@ struct BinaryenDWARFInfo {
     uint8_t addrSize = AddressSize;
     bool isLittleEndian = true;
     context = llvm::DWARFContext::create(sections, addrSize, isLittleEndian);
+    if (context->getMaxVersion() > 4) {
+      std::cerr << "warning: unsupported DWARF version ("
+                << context->getMaxVersion() << ")\n";
+    }
   }
 };
 
@@ -73,7 +75,7 @@ void dumpDWARF(const Module& wasm) {
   BinaryenDWARFInfo info(wasm);
   std::cout << "DWARF debug info\n";
   std::cout << "================\n\n";
-  for (auto& section : wasm.userSections) {
+  for (auto& section : wasm.customSections) {
     if (Name(section.name).startsWith(".debug_")) {
       std::cout << "Contains section " << section.name << " ("
                 << section.data.size() << " bytes)\n";
@@ -164,8 +166,8 @@ struct LineState {
           }
           default: {
             // An unknown opcode, ignore.
-            std::cerr << "warning: unknown subopcopde " << opcode.SubOpcode
-                      << '\n';
+            std::cerr << "warning: unknown subopcode " << opcode.SubOpcode
+                      << " (this may be an unsupported version of DWARF)\n";
           }
         }
         break;
@@ -182,7 +184,10 @@ struct LineState {
         return true;
       }
       case llvm::dwarf::DW_LNS_advance_pc: {
-        assert(table.MinInstLength == 1);
+        if (table.MinInstLength != 1) {
+          std::cerr << "warning: bad MinInstLength "
+                       "(this may be an unsupported DWARF version)";
+        }
         addr += opcode.Data;
         break;
       }
@@ -372,11 +377,11 @@ struct AddrExprMap {
   // Construct the map from the binaryLocations loaded from the wasm.
   AddrExprMap(const Module& wasm) {
     for (auto& func : wasm.functions) {
-      for (auto pair : func->expressionLocations) {
-        add(pair.first, pair.second);
+      for (auto& [expr, span] : func->expressionLocations) {
+        add(expr, span);
       }
-      for (auto pair : func->delimiterLocations) {
-        add(pair.first, pair.second);
+      for (auto& [expr, delim] : func->delimiterLocations) {
+        add(expr, delim);
       }
     }
   }
@@ -483,7 +488,7 @@ struct LocationUpdater {
   // Map start of line tables in the debug_line section to their new locations.
   std::unordered_map<BinaryLocation, BinaryLocation> debugLineMap;
 
-  typedef std::pair<BinaryLocation, BinaryLocation> OldToNew;
+  using OldToNew = std::pair<BinaryLocation, BinaryLocation>;
 
   // Map of compile unit index => old and new base offsets (i.e., in the
   // original binary and in the new one).
@@ -1067,7 +1072,8 @@ void writeDWARFSections(Module& wasm, const BinaryLocations& newLocations) {
 
   updateDebugLines(data, locationUpdater);
 
-  updateCompileUnits(info, data, locationUpdater, wasm.memory.is64());
+  bool is64 = wasm.memories.size() > 0 ? wasm.memories[0]->is64() : false;
+  updateCompileUnits(info, data, locationUpdater, is64);
 
   updateRanges(data, locationUpdater);
 
@@ -1079,7 +1085,7 @@ void writeDWARFSections(Module& wasm, const BinaryLocations& newLocations) {
 
   // Update the custom sections in the wasm.
   // TODO: efficiency
-  for (auto& section : wasm.userSections) {
+  for (auto& section : wasm.customSections) {
     if (Name(section.name).startsWith(".debug_")) {
       auto llvmName = section.name.substr(1);
       if (newSections.count(llvmName)) {
@@ -1105,6 +1111,4 @@ bool shouldPreserveDWARF(PassOptions& options, Module& wasm) { return false; }
 
 #endif // BUILD_LLVM_DWARF
 
-} // namespace Debug
-
-} // namespace wasm
+} // namespace wasm::Debug

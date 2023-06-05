@@ -7,7 +7,7 @@
   ;; CHECK:      (tag $e2 (param i32))
   (tag $e2 (param i32))
 
-  ;; CHECK:      (func $try-test
+  ;; CHECK:      (func $try-test (type $none_=>_none)
   ;; CHECK-NEXT:  (nop)
   ;; CHECK-NEXT: )
   (func $try-test
@@ -22,7 +22,7 @@
     )
   )
 
-  ;; CHECK:      (func $inner-try-catch_all-test
+  ;; CHECK:      (func $inner-try-catch_all-test (type $none_=>_i32) (result i32)
   ;; CHECK-NEXT:  (local $0 i32)
   ;; CHECK-NEXT:  (try $try0
   ;; CHECK-NEXT:   (do
@@ -31,13 +31,14 @@
   ;; CHECK-NEXT:    )
   ;; CHECK-NEXT:   )
   ;; CHECK-NEXT:   (catch_all
-  ;; CHECK-NEXT:    (local.set $0
+  ;; CHECK-NEXT:    (return
   ;; CHECK-NEXT:     (i32.const 1)
   ;; CHECK-NEXT:    )
   ;; CHECK-NEXT:   )
   ;; CHECK-NEXT:  )
   ;; CHECK-NEXT: )
-  (func $inner-try-catch_all-test (local $0 i32)
+  (func $inner-try-catch_all-test (result i32)
+    (local $0 i32)
     ;; The exception thrown in the inner try is caught by the inner catch_all,
     ;; so the outer try body does not throw and the outer try-catch can be
     ;; removed
@@ -48,7 +49,7 @@
             (throw $e (i32.const 0))
           )
           (catch_all
-            (local.set $0 (i32.const 1))
+            (return (i32.const 1))
           )
         )
       )
@@ -56,9 +57,10 @@
         (drop (pop i32))
       )
     )
+    (i32.const 2)
   )
 
-  ;; CHECK:      (func $inner-try-catch-test
+  ;; CHECK:      (func $inner-try-catch-test (type $none_=>_none)
   ;; CHECK-NEXT:  (local $0 i32)
   ;; CHECK-NEXT:  (try $try
   ;; CHECK-NEXT:   (do
@@ -106,7 +108,7 @@
     )
   )
 
-  ;; CHECK:      (func $br-in-catch
+  ;; CHECK:      (func $br-in-catch (type $none_=>_none)
   ;; CHECK-NEXT:  (unreachable)
   ;; CHECK-NEXT: )
   (func $br-in-catch
@@ -123,6 +125,96 @@
           (br $label$1)
         )
       )
+    )
+  )
+
+  ;; CHECK:      (func $try-delegate-outer-target (type $none_=>_none)
+  ;; CHECK-NEXT:  (local $0 i32)
+  ;; CHECK-NEXT:  (try $label$0
+  ;; CHECK-NEXT:   (do
+  ;; CHECK-NEXT:    (try $try
+  ;; CHECK-NEXT:     (do
+  ;; CHECK-NEXT:      (try $try2
+  ;; CHECK-NEXT:       (do
+  ;; CHECK-NEXT:        (throw $e
+  ;; CHECK-NEXT:         (i32.const 0)
+  ;; CHECK-NEXT:        )
+  ;; CHECK-NEXT:       )
+  ;; CHECK-NEXT:       (delegate $label$0)
+  ;; CHECK-NEXT:      )
+  ;; CHECK-NEXT:     )
+  ;; CHECK-NEXT:     (catch_all
+  ;; CHECK-NEXT:      (nop)
+  ;; CHECK-NEXT:     )
+  ;; CHECK-NEXT:    )
+  ;; CHECK-NEXT:   )
+  ;; CHECK-NEXT:  )
+  ;; CHECK-NEXT: )
+  (func $try-delegate-outer-target
+    (local $0 i32)
+    (try $label$0  ;; outer try
+      (do
+        ;; If it were not for the inner (delegate $label0), this middle try
+        ;; cannot throw even if there is a throw in the inner try, because this
+        ;; try has a catch_all. And Vacuum can replace the outer try-catch with
+        ;; the try's body if the body doesn't throw.
+        ;;
+        ;; But because the inner try has a delegate that targets the outer try,
+        ;; this middle try can throw, and we can't do the optimization for
+        ;; the outer try.
+        (try  ;; middle try
+          (do
+            (try  ;; inner try
+              (do
+                (throw $e
+                  (i32.const 0)
+                )
+              )
+              (delegate $label$0)
+            )
+          )
+          (catch_all)
+        )
+      )
+    )
+  )
+
+  ;; CHECK:      (func $trivial-catch-all-of-throw (type $none_=>_none)
+  ;; CHECK-NEXT:  (local $0 i32)
+  ;; CHECK-NEXT:  (try $try3
+  ;; CHECK-NEXT:   (do
+  ;; CHECK-NEXT:    (if
+  ;; CHECK-NEXT:     (local.get $0)
+  ;; CHECK-NEXT:     (throw $e
+  ;; CHECK-NEXT:      (i32.const 0)
+  ;; CHECK-NEXT:     )
+  ;; CHECK-NEXT:     (unreachable)
+  ;; CHECK-NEXT:    )
+  ;; CHECK-NEXT:   )
+  ;; CHECK-NEXT:   (catch_all
+  ;; CHECK-NEXT:    (nop)
+  ;; CHECK-NEXT:   )
+  ;; CHECK-NEXT:  )
+  ;; CHECK-NEXT: )
+  (func $trivial-catch-all-of-throw (local $0 i32)
+    ;; This try-catch's body throws, but the catch-all catches it, so the entire
+    ;; try can be optimized out.
+    (try
+      (do
+        (throw $e (i32.const 0))
+      )
+      (catch_all)
+    )
+    ;; Here we also have a possible trap, so we can't do it.
+    (try
+      (do
+        (if
+          (local.get $0)
+          (throw $e (i32.const 0))
+          (unreachable)
+        )
+      )
+      (catch_all)
     )
   )
 )

@@ -69,7 +69,7 @@ struct MetaDCEGraph {
   // be imported twice, for example. So we don't map a DCE node to an Import,
   // but rather the module.base pair ("id") for the import.
   // TODO: implement this in a safer way, not a string with a magic separator
-  typedef Name ImportId;
+  using ImportId = Name;
 
   ImportId getImportId(Name module, Name base) {
     if (module == "GOT.func" || module == "GOT.mem") {
@@ -115,19 +115,19 @@ struct MetaDCEGraph {
     // does not alter parent state, just adds to things pointed by it,
     // independently (each thread will add for one function, etc.)
     ModuleUtils::iterDefinedFunctions(wasm, [&](Function* func) {
-      auto dceName = getName("func", func->name.str);
+      auto dceName = getName("func", func->name.toString());
       DCENodeToFunction[dceName] = func->name;
       functionToDCENode[func->name] = dceName;
       nodes[dceName] = DCENode(dceName);
     });
     ModuleUtils::iterDefinedGlobals(wasm, [&](Global* global) {
-      auto dceName = getName("global", global->name.str);
+      auto dceName = getName("global", global->name.toString());
       DCENodeToGlobal[dceName] = global->name;
       globalToDCENode[global->name] = dceName;
       nodes[dceName] = DCENode(dceName);
     });
     ModuleUtils::iterDefinedTags(wasm, [&](Tag* tag) {
-      auto dceName = getName("tag", tag->name.str);
+      auto dceName = getName("tag", tag->name.toString());
       DCENodeToTag[dceName] = tag->name;
       tagToDCENode[tag->name] = dceName;
       nodes[dceName] = DCENode(dceName);
@@ -137,27 +137,27 @@ struct MetaDCEGraph {
     ModuleUtils::iterImportedFunctions(wasm, [&](Function* import) {
       auto id = getImportId(import->module, import->base);
       if (importIdToDCENode.find(id) == importIdToDCENode.end()) {
-        auto dceName = getName("importId", import->name.str);
+        auto dceName = getName("importId", import->name.toString());
         importIdToDCENode[id] = dceName;
       }
     });
     ModuleUtils::iterImportedGlobals(wasm, [&](Global* import) {
       auto id = getImportId(import->module, import->base);
       if (importIdToDCENode.find(id) == importIdToDCENode.end()) {
-        auto dceName = getName("importId", import->name.str);
+        auto dceName = getName("importId", import->name.toString());
         importIdToDCENode[id] = dceName;
       }
     });
     ModuleUtils::iterImportedTags(wasm, [&](Tag* import) {
       auto id = getImportId(import->module, import->base);
       if (importIdToDCENode.find(id) == importIdToDCENode.end()) {
-        auto dceName = getName("importId", import->name.str);
+        auto dceName = getName("importId", import->name.toString());
         importIdToDCENode[id] = dceName;
       }
     });
     for (auto& exp : wasm.exports) {
       if (exportToDCENode.find(exp->name) == exportToDCENode.end()) {
-        auto dceName = getName("export", exp->name.str);
+        auto dceName = getName("export", exp->name.toString());
         DCENodeToExport[dceName] = exp->name;
         exportToDCENode[exp->name] = dceName;
         nodes[dceName] = DCENode(dceName);
@@ -209,9 +209,7 @@ struct MetaDCEGraph {
           // it's an import.
           dceName = parent->importIdToDCENode[parent->getGlobalImportId(name)];
         }
-        if (parentDceName.isNull()) {
-          parent->roots.insert(parentDceName);
-        } else {
+        if (!parentDceName.isNull()) {
           parent->nodes[parentDceName].reaches.push_back(dceName);
         }
       }
@@ -237,11 +235,8 @@ struct MetaDCEGraph {
         });
       rooter.walk(segment->offset);
     });
-    for (auto& segment : wasm.memory.segments) {
-      if (!segment.isPassive) {
-        rooter.walk(segment.offset);
-      }
-    }
+    ModuleUtils::iterActiveDataSegments(
+      wasm, [&](DataSegment* segment) { rooter.walk(segment->offset); });
 
     // A parallel scanner for function bodies
     struct Scanner : public WalkerPass<PostWalker<Scanner>> {
@@ -249,7 +244,9 @@ struct MetaDCEGraph {
 
       Scanner(MetaDCEGraph* parent) : parent(parent) {}
 
-      Scanner* create() override { return new Scanner(parent); }
+      std::unique_ptr<Pass> create() override {
+        return std::make_unique<Scanner>(parent);
+      }
 
       void visitCall(Call* curr) {
         if (!getModule()->getFunction(curr->target)->imported()) {
@@ -265,6 +262,12 @@ struct MetaDCEGraph {
       }
       void visitGlobalGet(GlobalGet* curr) { handleGlobal(curr->name); }
       void visitGlobalSet(GlobalSet* curr) { handleGlobal(curr->name); }
+      void visitThrow(Throw* curr) { handleTag(curr->tag); }
+      void visitTry(Try* curr) {
+        for (auto tag : curr->catchTags) {
+          handleTag(tag);
+        }
+      }
 
     private:
       MetaDCEGraph* parent;
@@ -280,6 +283,17 @@ struct MetaDCEGraph {
         } else {
           // it's an import.
           dceName = parent->importIdToDCENode[parent->getGlobalImportId(name)];
+        }
+        parent->nodes[parent->functionToDCENode[getFunction()->name]]
+          .reaches.push_back(dceName);
+      }
+
+      void handleTag(Name name) {
+        Name dceName;
+        if (!getModule()->getTag(name)->imported()) {
+          dceName = parent->tagToDCENode[name];
+        } else {
+          dceName = parent->importIdToDCENode[parent->getTagImportId(name)];
         }
         parent->nodes[parent->functionToDCENode[getFunction()->name]]
           .reaches.push_back(dceName);
@@ -319,8 +333,7 @@ public:
       queue.pop_back();
       auto& node = nodes[name];
       for (auto target : node.reaches) {
-        if (reached.find(target) == reached.end()) {
-          reached.insert(target);
+        if (reached.emplace(target).second) {
           queue.push_back(target);
         }
       }
@@ -353,10 +366,9 @@ public:
   // removed, including on the outside
   void printAllUnused() {
     std::set<std::string> unused;
-    for (auto& pair : nodes) {
-      auto name = pair.first;
+    for (auto& [name, _] : nodes) {
       if (reached.find(name) == reached.end()) {
-        unused.insert(name.str);
+        unused.insert(name.toString());
       }
     }
     for (auto& name : unused) {
@@ -368,23 +380,19 @@ public:
   void dump() {
     std::cout << "=== graph ===\n";
     for (auto root : roots) {
-      std::cout << "root: " << root.str << '\n';
+      std::cout << "root: " << root << '\n';
     }
     std::map<Name, ImportId> importMap;
-    for (auto& pair : importIdToDCENode) {
-      auto& id = pair.first;
-      auto dceName = pair.second;
+    for (auto& [id, dceName] : importIdToDCENode) {
       importMap[dceName] = id;
     }
-    for (auto& pair : nodes) {
-      auto name = pair.first;
-      auto& node = pair.second;
-      std::cout << "node: " << name.str << '\n';
+    for (auto& [name, node] : nodes) {
+      std::cout << "node: " << name << '\n';
       if (importMap.find(name) != importMap.end()) {
         std::cout << "  is import " << importMap[name] << '\n';
       }
       if (DCENodeToExport.find(name) != DCENodeToExport.end()) {
-        std::cout << "  is export " << DCENodeToExport[name].str << ", "
+        std::cout << "  is export " << DCENodeToExport[name] << ", "
                   << wasm.getExport(DCENodeToExport[name])->value << '\n';
       }
       if (DCENodeToFunction.find(name) != DCENodeToFunction.end()) {
@@ -397,7 +405,7 @@ public:
         std::cout << "  is tag " << DCENodeToTag[name] << '\n';
       }
       for (auto target : node.reaches) {
-        std::cout << "  reaches: " << target.str << '\n';
+        std::cout << "  reaches: " << target << '\n';
       }
     }
     std::cout << "=============\n";
@@ -415,6 +423,8 @@ int main(int argc, const char* argv[]) {
   bool debugInfo = false;
   std::string graphFile;
   bool dump = false;
+
+  const std::string WasmMetaDCEOption = "wasm-opt options";
 
   ToolOptions options(
     "wasm-metadce",
@@ -465,6 +475,7 @@ int main(int argc, const char* argv[]) {
     .add("--output",
          "-o",
          "Output file (stdout if not specified)",
+         WasmMetaDCEOption,
          Options::Arguments::One,
          [](Options* o, const std::string& argument) {
            o->extra["output"] = argument;
@@ -473,21 +484,25 @@ int main(int argc, const char* argv[]) {
     .add("--emit-text",
          "-S",
          "Emit text instead of binary for the output file",
+         WasmMetaDCEOption,
          Options::Arguments::Zero,
          [&](Options* o, const std::string& argument) { emitBinary = false; })
     .add("--debuginfo",
          "-g",
          "Emit names section and debug info",
+         WasmMetaDCEOption,
          Options::Arguments::Zero,
          [&](Options* o, const std::string& arguments) { debugInfo = true; })
     .add("--graph-file",
          "-f",
          "Filename of the graph description file",
+         WasmMetaDCEOption,
          Options::Arguments::One,
          [&](Options* o, const std::string& argument) { graphFile = argument; })
     .add("--dump",
          "-d",
          "Dump the combined graph file (useful for debugging)",
+         WasmMetaDCEOption,
          Options::Arguments::Zero,
          [&](Options* o, const std::string& arguments) { dump = true; })
     .add_positional("INFILE",

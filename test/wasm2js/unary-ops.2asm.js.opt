@@ -1,5 +1,5 @@
 
-function asmFunc(env) {
+function asmFunc(imports) {
  var Math_imul = Math.imul;
  var Math_fround = Math.fround;
  var Math_abs = Math.abs;
@@ -10,15 +10,11 @@ function asmFunc(env) {
  var Math_ceil = Math.ceil;
  var Math_trunc = Math.trunc;
  var Math_sqrt = Math.sqrt;
- var abort = env.abort;
- var nan = NaN;
- var infinity = Infinity;
  var i64toi32_i32$HIGH_BITS = 0;
  function $1($0) {
   $0 = $0 | 0;
-  var $1_1 = 0, $2 = 0;
+  var $1_1 = 0;
   while (1) {
-   $2 = $1_1;
    if ($0) {
     $0 = $0 - 1 & $0;
     $1_1 = $1_1 + 1 | 0;
@@ -26,7 +22,7 @@ function asmFunc(env) {
    }
    break;
   };
-  return $2 | 0;
+  return $1_1 | 0;
  }
  
  function $6($0) {
@@ -45,24 +41,21 @@ function asmFunc(env) {
  }
  
  function legalstub$2($0, $1_1, $2, $3) {
-  var $4 = 0, $5 = 0, $6_1 = 0, $7_1 = 0;
-  $7_1 = $2;
-  $4 = $1_1;
+  var $4 = 0, $5 = 0, $6_1 = 0;
+  $4 = $0;
   while (1) {
-   $2 = $5;
-   $1_1 = $6_1;
-   if ($0 | $4) {
-    $1_1 = $0;
-    $0 = $1_1 - 1 & $1_1;
-    $4 = $4 - ($1_1 >>> 0 < 1) & $4;
+   if ($1_1 | $4) {
+    $0 = $4;
+    $4 = $0 & $0 - 1;
+    $1_1 = $1_1 - !$0 & $1_1;
     $5 = $5 + 1 | 0;
-    $6_1 = $5 >>> 0 < 1 ? $6_1 + 1 | 0 : $6_1;
+    $6_1 = $5 ? $6_1 : $6_1 + 1 | 0;
     continue;
    }
    break;
   };
-  i64toi32_i32$HIGH_BITS = $1_1;
-  return ($2 | 0) == ($7_1 | 0) & ($3 | 0) == (i64toi32_i32$HIGH_BITS | 0);
+  i64toi32_i32$HIGH_BITS = $6_1;
+  return ($2 | 0) == ($5 | 0) & ($3 | 0) == (i64toi32_i32$HIGH_BITS | 0);
  }
  
  function legalstub$3($0, $1_1, $2) {
@@ -86,8 +79,8 @@ function asmFunc(env) {
  
  function legalstub$9($0, $1_1, $2, $3) {
   var $4 = 0, $5 = 0, $6_1 = 0, $7_1 = 0;
-  __inlined_func$__wasm_ctz_i64 : {
-   if ($0 | $1_1) {
+  __inlined_func$__wasm_ctz_i64$3 : {
+   if ($1_1 | $0) {
     $4 = $1_1 - 1 | 0;
     $5 = $4 + 1 | 0;
     $6_1 = $4;
@@ -97,7 +90,7 @@ function asmFunc(env) {
     $0 = ($0 | 0) == 32 ? $7_1 : $0;
     $1_1 = 63 - $0 | 0;
     i64toi32_i32$HIGH_BITS = 0 - ($0 >>> 0 > 63) | 0;
-    break __inlined_func$__wasm_ctz_i64;
+    break __inlined_func$__wasm_ctz_i64$3;
    }
    i64toi32_i32$HIGH_BITS = 0;
    $1_1 = 64;
@@ -118,8 +111,8 @@ function asmFunc(env) {
  };
 }
 
-var retasmFunc = asmFunc(  { abort: function() { throw new Error('abort'); }
-  });
+var retasmFunc = asmFunc({
+});
 export var i32_popcnt = retasmFunc.i32_popcnt;
 export var check_popcnt_i64 = retasmFunc.check_popcnt_i64;
 export var check_extend_ui32 = retasmFunc.check_extend_ui32;

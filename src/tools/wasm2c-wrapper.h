@@ -30,9 +30,7 @@ namespace wasm {
 inline std::string wasm2cMangle(Name name, Signature sig) {
   const char escapePrefix = 'Z';
   std::string mangled = "Z_";
-  const char* original = name.str;
-  unsigned char c;
-  while ((c = *original++)) {
+  for (unsigned char c : name.str) {
     if ((isalnum(c) && c != escapePrefix) || c == '_') {
       // This character is ok to emit as it is.
       mangled += c;
@@ -139,12 +137,6 @@ int main(int argc, char** argv) {
   // compile times are O(size * num_setjmps).
   for (size_t curr = 0;; curr++) {
   )";
-  if (wasm.getExportOrNull("hangLimitInitializer")) {
-    ret += R"(
-    // If present, call the hang limit initializer before each export.
-    (*Z_hangLimitInitializerZ_vv)();
-)";
-  }
   ret += R"(
     // Prepare to call the export, so we can catch traps.
     if (WASM_RT_SETJMP(g_jmp_buf) != 0) {
@@ -168,14 +160,14 @@ int main(int argc, char** argv) {
     auto* func = wasm.getFunction(exp->value);
 
     ret += std::string("          puts(\"[fuzz-exec] calling ") +
-           exp->name.str + "\");\n";
+           exp->name.toString() + "\");\n";
     auto result = func->getResults();
 
     // Emit the call itself.
     ret += "            ";
     if (result != Type::none) {
-      ret += std::string("printf(\"[fuzz-exec] note result: ") + exp->name.str +
-             " => ";
+      ret += std::string("printf(\"[fuzz-exec] note result: ") +
+             exp->name.toString() + " => ";
       TODO_SINGLE_COMPOUND(result);
       switch (result.getBasic()) {
         case Type::i32:
@@ -205,8 +197,7 @@ int main(int argc, char** argv) {
 
     // Emit the parameters (all 0s, like the other wrappers).
     bool first = true;
-    for (const auto& param : func->getParams()) {
-      WASM_UNUSED(param);
+    for ([[maybe_unused]] const auto& param : func->getParams()) {
       if (!first) {
         ret += ", ";
       }

@@ -25,8 +25,11 @@
 #include <ir/find_all.h>
 #include <ir/linear-execution.h>
 #include <ir/local-graph.h>
+#include <ir/local-structural-dominance.h>
+#include <ir/lubs.h>
 #include <ir/utils.h>
 #include <pass.h>
+#include <wasm-builder.h>
 #include <wasm.h>
 
 namespace wasm {
@@ -34,7 +37,13 @@ namespace wasm {
 struct LocalSubtyping : public WalkerPass<PostWalker<LocalSubtyping>> {
   bool isFunctionParallel() override { return true; }
 
-  Pass* create() override { return new LocalSubtyping(); }
+  // This pass carefully avoids breaking validation by only refining a local's
+  // type to be non-nullable if it would validate.
+  bool requiresNonNullableLocalFixups() override { return false; }
+
+  std::unique_ptr<Pass> create() override {
+    return std::make_unique<LocalSubtyping>();
+  }
 
   void doWalkFunction(Function* func) {
     if (!getModule()->features.hasGC()) {
@@ -57,8 +66,7 @@ struct LocalSubtyping : public WalkerPass<PostWalker<LocalSubtyping>> {
     std::vector<std::vector<LocalSet*>> setsForLocal(numLocals);
     std::vector<std::vector<LocalGet*>> getsForLocal(numLocals);
 
-    for (auto& kv : localGraph.locations) {
-      auto* curr = kv.first;
+    for (auto& [curr, _] : localGraph.locations) {
       if (auto* set = curr->dynCast<LocalSet>()) {
         setsForLocal[set->index].push_back(set);
       } else {
@@ -67,25 +75,29 @@ struct LocalSubtyping : public WalkerPass<PostWalker<LocalSubtyping>> {
       }
     }
 
-    // Find which vars use the default value, if we allow non-nullable locals.
-    //
-    // If that feature is not enabled, then we can safely assume that the
-    // default is never used - the default would be a null value, and the type
-    // of the null does not really matter as all nulls compare equally, so we do
-    // not need to worry.
-    std::unordered_set<Index> usesDefault;
+    // Find which vars can be non-nullable.
+    std::unordered_set<Index> cannotBeNonNullable;
 
     if (getModule()->features.hasGCNNLocals()) {
-      for (auto& kv : localGraph.getSetses) {
-        auto* get = kv.first;
-        auto& sets = kv.second;
+      // If the feature is enabled then the only constraint is being able to
+      // read the default value - if it is readable, the local cannot become
+      // non-nullable.
+      for (auto& [get, sets] : localGraph.getSetses) {
         auto index = get->index;
         if (func->isVar(index) &&
             std::any_of(sets.begin(), sets.end(), [&](LocalSet* set) {
               return set == nullptr;
             })) {
-          usesDefault.insert(index);
+          cannotBeNonNullable.insert(index);
         }
+      }
+    } else {
+      // Without GCNNLocals, validation rules follow the spec rules: all gets
+      // must be dominated structurally by sets, for the local to be non-
+      // nullable.
+      LocalStructuralDominance info(func, *getModule());
+      for (auto index : info.nonDominatingIndices) {
+        cannotBeNonNullable.insert(index);
       }
     }
 
@@ -102,6 +114,7 @@ struct LocalSubtyping : public WalkerPass<PostWalker<LocalSubtyping>> {
     // TODO: handle cycles of X -> Y -> X etc.
 
     bool more;
+    bool optimized = false;
 
     do {
       more = false;
@@ -116,26 +129,27 @@ struct LocalSubtyping : public WalkerPass<PostWalker<LocalSubtyping>> {
       // type.
 
       for (Index i = varBase; i < numLocals; i++) {
+        auto oldType = func->getLocalType(i);
+
         // Find all the types assigned to the var, and compute the optimal LUB.
-        std::unordered_set<Type> types;
+        LUBFinder lub;
         for (auto* set : setsForLocal[i]) {
-          types.insert(set->value->type);
+          lub.note(set->value->type);
+          if (lub.getLUB() == oldType) {
+            break;
+          }
         }
-        if (types.empty()) {
+        if (!lub.noted()) {
           // Nothing is assigned to this local (other opts will remove it).
           continue;
         }
 
-        auto oldType = func->getLocalType(i);
-        auto newType = Type::getLeastUpperBound(types);
+        auto newType = lub.getLUB();
         assert(newType != Type::none); // in valid wasm there must be a LUB
 
         // Remove non-nullability if we disallow that in locals.
         if (newType.isNonNullable()) {
-          // As mentioned earlier, even if we allow non-nullability, there may
-          // be a problem if the default value - a null - is used. In that case,
-          // remove non-nullability as well.
-          if (!getModule()->features.hasGCNNLocals() || usesDefault.count(i)) {
+          if (cannotBeNonNullable.count(i)) {
             newType = Type(newType.getHeapType(), Nullable);
           }
         } else if (!newType.isDefaultable()) {
@@ -150,6 +164,7 @@ struct LocalSubtyping : public WalkerPass<PostWalker<LocalSubtyping>> {
           assert(Type::isSubType(newType, oldType));
           func->vars[i - varBase] = newType;
           more = true;
+          optimized = true;
 
           // Update gets and tees.
           for (auto* get : getsForLocal[i]) {
@@ -167,6 +182,50 @@ struct LocalSubtyping : public WalkerPass<PostWalker<LocalSubtyping>> {
         }
       }
     } while (more);
+
+    // If we ever optimized, then we also need to do a final pass to update any
+    // unreachable gets and tees. They are not seen or updated in the above
+    // analysis, but must be fixed up for validation to work.
+    if (optimized) {
+      for (auto* get : FindAll<LocalGet>(func->body).list) {
+        get->type = func->getLocalType(get->index);
+      }
+      for (auto* set : FindAll<LocalSet>(func->body).list) {
+        auto newType = func->getLocalType(set->index);
+        if (set->isTee()) {
+          set->type = newType;
+          set->finalize();
+        }
+
+        // If this set was not processed earlier - that is, if it is in
+        // unreachable code - then it may have an incompatible type. That is,
+        // If we saw a reachable set that writes type A, and this set writes
+        // type B, we may have specialized the local type to A, but the value
+        // of type B in this unreachable set is no longer valid to write to
+        // that local. In such a case we must do additional work.
+        if (!Type::isSubType(set->value->type, newType)) {
+          // The type is incompatible. To fix this, replace
+          //
+          //  (set (bad-value))
+          //
+          // with
+          //
+          //  (set (block
+          //   (drop (bad-value))
+          //   (unreachable)
+          //  ))
+          //
+          // (We cannot just ignore the bad value, as it may contain a break to
+          // a target that is necessary for validation.)
+          Builder builder(*getModule());
+          set->value = builder.makeSequence(builder.makeDrop(set->value),
+                                            builder.makeUnreachable());
+        }
+      }
+
+      // Also update their parents.
+      ReFinalize().walkFunctionInModule(func, getModule());
+    }
   }
 };
 

@@ -45,7 +45,9 @@ var Asyncify = {
   sleeps: 0,
   maxDepth: 0,
   DATA_ADDR: 4,
-  DATA_MAX: 65536,
+  // The fuzzer emits memories of size 16 (pages). Allow us to use almost all of
+  // that (we start from offset 4, so we can't use them all).
+  DATA_MAX: 15 * 65536,
   savedMemory: null,
   instrumentImports: function(imports) {
     var ret = {};
@@ -175,7 +177,15 @@ var imports = {
 imports = Asyncify.instrumentImports(imports);
 
 // Create the wasm.
-var instance = new WebAssembly.Instance(new WebAssembly.Module(binary), imports);
+var module = new WebAssembly.Module(binary);
+
+var instance;
+try {
+  instance = new WebAssembly.Instance(module, imports);
+} catch (e) {
+  console.log('exception: failed to instantiate module');
+  quit();
+}
 
 // Handle the exports.
 var exports = instance.exports;
@@ -216,4 +226,3 @@ sortedExports.forEach(function(e) {
 
 // Finish up
 Asyncify.finish();
-

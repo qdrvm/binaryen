@@ -69,6 +69,7 @@
 
 #include "ir/module-splitting.h"
 #include "ir/element-utils.h"
+#include "ir/export-utils.h"
 #include "ir/manipulation.h"
 #include "ir/module-utils.h"
 #include "ir/names.h"
@@ -76,11 +77,11 @@
 #include "wasm-builder.h"
 #include "wasm.h"
 
-namespace wasm {
-
-namespace ModuleSplitting {
+namespace wasm::ModuleSplitting {
 
 namespace {
+
+static const Name LOAD_SECONDARY_STATUS = "load_secondary_module_status";
 
 template<class F> void forEachElement(Module& module, F f) {
   ModuleUtils::iterActiveElementSegments(module, [&](ElementSegment* segment) {
@@ -145,11 +146,11 @@ void TableSlotManager::addSlot(Name func, Slot slot) {
 
 TableSlotManager::TableSlotManager(Module& module) : module(module) {
   // TODO: Reject or handle passive element segments
-  auto it = std::find_if(module.tables.begin(),
-                         module.tables.end(),
-                         [&](std::unique_ptr<Table>& table) {
-                           return table->type == Type::funcref;
-                         });
+  auto funcref = Type(HeapType::func, Nullable);
+  auto it = std::find_if(
+    module.tables.begin(),
+    module.tables.end(),
+    [&](std::unique_ptr<Table>& table) { return table->type == funcref; });
   if (it == module.tables.end()) {
     return;
   }
@@ -165,7 +166,7 @@ TableSlotManager::TableSlotManager(Module& module) : module(module) {
   // append new items at constant offsets after all existing items at constant
   // offsets.
   if (activeTableSegments.size() == 1 &&
-      activeTableSegments[0]->type == Type::funcref &&
+      activeTableSegments[0]->type == funcref &&
       !activeTableSegments[0]->offset->is<Const>()) {
     assert(activeTableSegments[0]->offset->is<GlobalGet>() &&
            "Unexpected initializer instruction");
@@ -275,6 +276,9 @@ struct ModuleSplitter {
   // Map placeholder indices to the names of the functions they replace.
   std::map<size_t, Name> placeholderMap;
 
+  // Internal name of the LOAD_SECONDARY_MODULE function.
+  Name internalLoadSecondaryModule;
+
   // Initialization helpers
   static std::unique_ptr<Module> initSecondary(const Module& primary);
   static std::pair<std::set<Name>, std::set<Name>>
@@ -283,8 +287,10 @@ struct ModuleSplitter {
 
   // Other helpers
   void exportImportFunction(Name func);
+  Expression* maybeLoadSecondary(Builder& builder, Expression* callIndirect);
 
   // Main splitting steps
+  void setupJSPI();
   void moveSecondaryFunctions();
   void thunkExportedSecondaryFunctions();
   void indirectCallsToSecondaryFunctions();
@@ -299,6 +305,9 @@ struct ModuleSplitter {
       primaryFuncs(classifiedFuncs.first),
       secondaryFuncs(classifiedFuncs.second), tableManager(primary),
       exportedPrimaryFuncs(initExportedPrimaryFuncs(primary)) {
+    if (config.jspi) {
+      setupJSPI();
+    }
     moveSecondaryFunctions();
     thunkExportedSecondaryFunctions();
     indirectCallsToSecondaryFunctions();
@@ -307,6 +316,23 @@ struct ModuleSplitter {
     shareImportableItems();
   }
 };
+
+void ModuleSplitter::setupJSPI() {
+  assert(primary.getExportOrNull(LOAD_SECONDARY_MODULE) &&
+         "The load secondary module function must exist");
+  // Remove the exported LOAD_SECONDARY_MODULE function since it's only needed
+  // internally.
+  internalLoadSecondaryModule = primary.getExport(LOAD_SECONDARY_MODULE)->value;
+  primary.removeExport(LOAD_SECONDARY_MODULE);
+  Builder builder(primary);
+  // Add a global to track whether the secondary module has been loaded yet.
+  primary.addGlobal(builder.makeGlobal(LOAD_SECONDARY_STATUS,
+                                       Type::i32,
+                                       builder.makeConst(int32_t(0)),
+                                       Builder::Mutable));
+  primary.addExport(builder.makeExport(
+    LOAD_SECONDARY_STATUS, LOAD_SECONDARY_STATUS, ExternalKind::Global));
+}
 
 std::unique_ptr<Module> ModuleSplitter::initSecondary(const Module& primary) {
   // Create the secondary module and copy trivial properties.
@@ -320,7 +346,12 @@ std::pair<std::set<Name>, std::set<Name>>
 ModuleSplitter::classifyFunctions(const Module& primary, const Config& config) {
   std::set<Name> primaryFuncs, secondaryFuncs;
   for (auto& func : primary.functions) {
-    if (func->imported() || config.primaryFuncs.count(func->name)) {
+    // In JSPI mode exported functions cannot be moved to the secondary
+    // module since that would make them async when they may not have the JSPI
+    // wrapper. Exported JSPI functions can still benefit from splitting though
+    // since only the JSPI wrapper stub will remain in the primary module.
+    if (func->imported() || config.primaryFuncs.count(func->name) ||
+        (config.jspi && ExportUtils::isExported(primary, *func))) {
       primaryFuncs.insert(func->name);
     } else {
       assert(func->name != primary.start && "The start function must be kept");
@@ -355,7 +386,7 @@ void ModuleSplitter::exportImportFunction(Name funcName) {
       } while (primary.getExportOrNull(exportName) != nullptr);
     } else {
       exportName = Names::getValidExportName(
-        primary, config.newExportPrefix + funcName.c_str());
+        primary, config.newExportPrefix + funcName.toString());
     }
     primary.addExport(
       Builder::makeExport(exportName, funcName, ExternalKind::Function));
@@ -407,8 +438,22 @@ void ModuleSplitter::thunkExportedSecondaryFunctions() {
     }
     auto tableSlot = tableManager.getSlot(secondaryFunc, func->type);
     func->body = builder.makeCallIndirect(
-      tableSlot.tableName, tableSlot.makeExpr(primary), args, func->getSig());
+      tableSlot.tableName, tableSlot.makeExpr(primary), args, func->type);
   }
+}
+
+Expression* ModuleSplitter::maybeLoadSecondary(Builder& builder,
+                                               Expression* callIndirect) {
+  if (!config.jspi) {
+    return callIndirect;
+  }
+  // Check if the secondary module is loaded and if it isn't, call the
+  // function to load it.
+  auto* loadSecondary = builder.makeIf(
+    builder.makeUnary(EqZInt32,
+                      builder.makeGlobalGet(LOAD_SECONDARY_STATUS, Type::i32)),
+    builder.makeCall(internalLoadSecondaryModule, {}, Type::none));
+  return builder.makeSequence(loadSecondary, callIndirect);
 }
 
 void ModuleSplitter::indirectCallsToSecondaryFunctions() {
@@ -427,12 +472,14 @@ void ModuleSplitter::indirectCallsToSecondaryFunctions() {
       }
       auto* func = parent.secondary.getFunction(curr->target);
       auto tableSlot = parent.tableManager.getSlot(curr->target, func->type);
-      replaceCurrent(
+
+      replaceCurrent(parent.maybeLoadSecondary(
+        builder,
         builder.makeCallIndirect(tableSlot.tableName,
                                  tableSlot.makeExpr(parent.primary),
                                  curr->operands,
-                                 func->getSig(),
-                                 curr->isReturn));
+                                 func->type,
+                                 curr->isReturn)));
     }
     void visitRefFunc(RefFunc* curr) {
       assert(false && "TODO: handle ref.func as well");
@@ -494,8 +541,7 @@ void ModuleSplitter::setupTablePatching() {
       placeholder->module = config.placeholderNamespace;
       placeholder->base = std::to_string(index);
       placeholder->name = Names::getValidFunctionName(
-        primary,
-        std::string("placeholder_") + std::string(placeholder->base.c_str()));
+        primary, std::string("placeholder_") + placeholder->base.toString());
       placeholder->hasExplicitName = false;
       placeholder->type = secondaryFunc->type;
       elem = placeholder->name;
@@ -614,14 +660,9 @@ void ModuleSplitter::shareImportableItems() {
   // TODO: Be more selective by only sharing global items that are actually used
   // in the secondary module, just like we do for functions.
 
-  if (primary.memory.exists) {
-    secondary.memory.exists = true;
-    secondary.memory.initial = primary.memory.initial;
-    secondary.memory.max = primary.memory.max;
-    secondary.memory.shared = primary.memory.shared;
-    secondary.memory.indexType = primary.memory.indexType;
-    makeImportExport(
-      primary.memory, secondary.memory, "memory", ExternalKind::Memory);
+  for (auto& memory : primary.memories) {
+    auto secondaryMemory = ModuleUtils::copyMemory(memory.get(), secondary);
+    makeImportExport(*memory, *secondaryMemory, "memory", ExternalKind::Memory);
   }
 
   for (auto& table : primary.tables) {
@@ -664,6 +705,4 @@ Results splitFunctions(Module& primary, const Config& config) {
   return {std::move(split.secondaryPtr), std::move(split.placeholderMap)};
 }
 
-} // namespace ModuleSplitting
-
-} // namespace wasm
+} // namespace wasm::ModuleSplitting

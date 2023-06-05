@@ -22,19 +22,17 @@
 // Ensures each type has a name. This can be useful for debugging.
 //
 
-using namespace std;
-
 namespace wasm {
 
 // An arbitrary limit, above which we rename types.
 static const size_t NameLenLimit = 20;
 
 struct NameTypes : public Pass {
-  void run(PassRunner* runner, Module* module) override {
+  bool requiresNonNullableLocalFixups() override { return false; }
+
+  void run(Module* module) override {
     // Find all the types.
-    std::vector<HeapType> types;
-    std::unordered_map<HeapType, Index> typeIndices;
-    ModuleUtils::collectHeapTypes(*module, types, typeIndices);
+    std::vector<HeapType> types = ModuleUtils::collectHeapTypes(*module);
 
     // Ensure simple names. If a name already exists, and is short enough, keep
     // it.

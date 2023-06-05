@@ -3,17 +3,19 @@
  (type $i32_=>_none (func (param i32)))
  (type $i64_=>_none (func (param i64)))
  (type $i32_i64_=>_none (func (param i32 i64)))
+ (type $eqref_=>_none (func (param eqref)))
  (tag $tag$0 (param i32))
  (tag $tag$1 (param i64))
  (tag $tag$2 (param i32 i64))
- (tag $tag$3 (param))
- (func $0
+ (tag $tag$3 (param eqref))
+ (tag $tag$4 (param))
+ (func $0 (type $none_=>_none)
   (nop)
  )
- (func $1
+ (func $1 (type $none_=>_none)
   (nop)
  )
- (func $2
+ (func $2 (type $none_=>_none)
   (local $0 i32)
   (local $1 i64)
   (local $2 (i32 i64))
@@ -195,7 +197,7 @@
     )
    )
   )
-  (try
+  (try $label$37
    (do
     (throw $tag$0
      (i32.const 0)
@@ -203,7 +205,7 @@
    )
   )
  )
- (func $3
+ (func $3 (type $none_=>_none)
   (try $label$9
    (do
     (block $label$1
@@ -269,12 +271,12 @@
    (do
     (nop)
    )
-   (catch $tag$3
+   (catch $tag$4
     (nop)
    )
   )
  )
- (func $4
+ (func $4 (type $none_=>_none)
   (try $label$3
    (do
     (call $0)
@@ -379,6 +381,61 @@
     )
    )
   )
+ )
+ (func $5 (type $none_=>_none)
+  (try $label$5
+   (do
+    (nop)
+   )
+   (catch $tag$0
+    (throw $tag$0
+     (if (result i32)
+      (pop i32)
+      (i32.const 0)
+      (i32.const 3)
+     )
+    )
+   )
+  )
+  (try $label$8
+   (do
+    (nop)
+   )
+   (catch $tag$3
+    (drop
+     (pop eqref)
+    )
+   )
+  )
+ )
+ (func $6 (type $none_=>_none)
+  (try $label$6
+   (do
+    (block $label$1
+     (try $label$4
+      (do
+       (throw $tag$0
+        (i32.const 0)
+       )
+      )
+      (delegate $label$6)
+     )
+    )
+   )
+  )
+ )
+ (func $7 (type $none_=>_none)
+  (block $label$1
+   (block $label$2
+   )
+   (try $label$5
+    (do
+     (nop)
+    )
+    (delegate 1)
+   )
+  )
+  (nop)
  )
 )
 

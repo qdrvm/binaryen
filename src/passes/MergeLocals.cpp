@@ -62,7 +62,9 @@ struct MergeLocals
   // FIXME DWARF updating does not handle local changes yet.
   bool invalidatesDWARF() override { return true; }
 
-  Pass* create() override { return new MergeLocals(); }
+  std::unique_ptr<Pass> create() override {
+    return std::make_unique<MergeLocals>();
+  }
 
   void doWalkFunction(Function* func) {
     // first, instrument the graph by modifying each copy
@@ -193,9 +195,7 @@ struct MergeLocals
       // logic as before).
       LocalGraph postGraph(func);
       postGraph.computeSetInfluences();
-      for (auto& pair : optimizedToCopy) {
-        auto* copy = pair.first;
-        auto* trivial = pair.second;
+      for (auto& [copy, trivial] : optimizedToCopy) {
         auto& trivialInfluences = preGraph.setInfluences[trivial];
         for (auto* influencedGet : trivialInfluences) {
           // verify the set
@@ -209,9 +209,7 @@ struct MergeLocals
           }
         }
       }
-      for (auto& pair : optimizedToTrivial) {
-        auto* copy = pair.first;
-        auto* trivial = pair.second;
+      for (auto& [copy, trivial] : optimizedToTrivial) {
         auto& copyInfluences = preGraph.setInfluences[copy];
         for (auto* influencedGet : copyInfluences) {
           // verify the set

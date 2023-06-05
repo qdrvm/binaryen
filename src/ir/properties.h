@@ -22,18 +22,7 @@
 #include "ir/match.h"
 #include "wasm.h"
 
-namespace wasm {
-
-namespace Properties {
-
-inline bool emitsBoolean(Expression* curr) {
-  if (auto* unary = curr->dynCast<Unary>()) {
-    return unary->isRelational();
-  } else if (auto* binary = curr->dynCast<Binary>()) {
-    return binary->isRelational();
-  }
-  return false;
-}
+namespace wasm::Properties {
 
 inline bool isSymmetric(Binary* binary) {
   switch (binary->op) {
@@ -53,8 +42,12 @@ inline bool isSymmetric(Binary* binary) {
     case EqInt64:
     case NeInt64:
 
+    case MinFloat32:
+    case MaxFloat32:
     case EqFloat32:
     case NeFloat32:
+    case MinFloat64:
+    case MaxFloat64:
     case EqFloat64:
     case NeFloat64:
       return true;
@@ -84,11 +77,18 @@ inline bool isNamedControlFlow(Expression* curr) {
 
 // A constant expression is something like a Const: it has a fixed value known
 // at compile time, and passes that propagate constants can try to propagate it.
-// Constant expressions are also allowed in global initializers in wasm.
-// TODO: look into adding more things here like RttCanon.
+// Constant expressions are also allowed in global initializers in wasm. Also
+// when two constant expressions compare equal at compile time, their values at
+// runtime will be equal as well. TODO: combine this with
+// isValidInConstantExpression or find better names(#4845)
 inline bool isSingleConstantExpression(const Expression* curr) {
+  if (auto* refAs = curr->dynCast<RefAs>()) {
+    if (refAs->op == ExternExternalize || refAs->op == ExternInternalize) {
+      return isSingleConstantExpression(refAs->value);
+    }
+  }
   return curr->is<Const>() || curr->is<RefNull>() || curr->is<RefFunc>() ||
-         (curr->is<I31New>() && curr->cast<I31New>()->value->is<Const>());
+         curr->is<StringConst>();
 }
 
 inline bool isConstantExpression(const Expression* curr) {
@@ -116,10 +116,18 @@ inline Literal getLiteral(const Expression* curr) {
   } else if (auto* n = curr->dynCast<RefNull>()) {
     return Literal(n->type);
   } else if (auto* r = curr->dynCast<RefFunc>()) {
-    return Literal(r->func, r->type);
+    return Literal(r->func, r->type.getHeapType());
   } else if (auto* i = curr->dynCast<I31New>()) {
     if (auto* c = i->value->dynCast<Const>()) {
       return Literal::makeI31(c->value.geti32());
+    }
+  } else if (auto* s = curr->dynCast<StringConst>()) {
+    return Literal(s->string.toString());
+  } else if (auto* r = curr->dynCast<RefAs>()) {
+    if (r->op == ExternExternalize) {
+      return getLiteral(r->value).externalize();
+    } else if (r->op == ExternInternalize) {
+      return getLiteral(r->value).internalize();
     }
   }
   WASM_UNREACHABLE("non-constant expression");
@@ -249,64 +257,142 @@ inline Index getZeroExtBits(Expression* curr) {
 // child of this expression. See getFallthrough for a method that looks all the
 // way to the final value falling through, potentially through multiple
 // intermediate expressions.
-inline Expression* getImmediateFallthrough(Expression* curr,
-                                           const PassOptions& passOptions,
-                                           FeatureSet features) {
+//
+// Behavior wrt tee/br_if is customizable, since in some cases we do not want to
+// look through them (for example, the type of a tee is related to the local,
+// not the value, so if we returned the fallthrough of the tee we'd have a
+// possible difference between the type in the IR and the type of the value,
+// which some cases care about; the same for a br_if, whose type is related to
+// the branch target).
+//
+// TODO: Receive a Module instead of FeatureSet, to pass to EffectAnalyzer?
+
+enum class FallthroughBehavior { AllowTeeBrIf, NoTeeBrIf };
+
+inline Expression** getImmediateFallthroughPtr(
+  Expression** currp,
+  const PassOptions& passOptions,
+  Module& module,
+  FallthroughBehavior behavior = FallthroughBehavior::AllowTeeBrIf) {
+  auto* curr = *currp;
   // If the current node is unreachable, there is no value
   // falling through.
   if (curr->type == Type::unreachable) {
-    return curr;
+    return currp;
   }
   if (auto* set = curr->dynCast<LocalSet>()) {
-    if (set->isTee()) {
-      return set->value;
+    if (set->isTee() && behavior == FallthroughBehavior::AllowTeeBrIf) {
+      return &set->value;
     }
   } else if (auto* block = curr->dynCast<Block>()) {
     // if no name, we can't be broken to, and then can look at the fallthrough
     if (!block->name.is() && block->list.size() > 0) {
-      return block->list.back();
+      return &block->list.back();
     }
   } else if (auto* loop = curr->dynCast<Loop>()) {
-    return loop->body;
+    return &loop->body;
   } else if (auto* iff = curr->dynCast<If>()) {
     if (iff->ifFalse) {
       // Perhaps just one of the two actually returns.
       if (iff->ifTrue->type == Type::unreachable) {
-        return iff->ifFalse;
+        return &iff->ifFalse;
       } else if (iff->ifFalse->type == Type::unreachable) {
-        return iff->ifTrue;
+        return &iff->ifTrue;
       }
     }
   } else if (auto* br = curr->dynCast<Break>()) {
-    if (br->condition && br->value) {
-      return br->value;
+    // Note that we must check for the ability to reorder the condition and the
+    // value, as the value is first, which would be a problem here:
+    //
+    //  (br_if ..
+    //    (local.get $x)    ;; value
+    //    (tee_local $x ..) ;; condition
+    //  )
+    //
+    // We must not say that the fallthrough value is $x, since it is the
+    // *earlier* value of $x before the tee that is passed out. But, if we can
+    // reorder then that means that the value could have been last and so we do
+    // know the fallthrough in that case.
+    if (br->condition && br->value &&
+        behavior == FallthroughBehavior::AllowTeeBrIf &&
+        EffectAnalyzer::canReorder(
+          passOptions, module, br->condition, br->value)) {
+      return &br->value;
     }
   } else if (auto* tryy = curr->dynCast<Try>()) {
-    if (!EffectAnalyzer(passOptions, features, tryy->body).throws) {
-      return tryy->body;
+    if (!EffectAnalyzer(passOptions, module, tryy->body).throws()) {
+      return &tryy->body;
     }
   } else if (auto* as = curr->dynCast<RefCast>()) {
-    return as->ref;
+    return &as->ref;
   } else if (auto* as = curr->dynCast<RefAs>()) {
-    return as->value;
+    // Extern conversions are not casts and actually produce new values.
+    // Treating them as fallthroughs would lead to misoptimizations of
+    // subsequent casts.
+    if (as->op != ExternInternalize && as->op != ExternExternalize) {
+      return &as->value;
+    }
   } else if (auto* br = curr->dynCast<BrOn>()) {
-    return br->ref;
+    return &br->ref;
   }
-  return curr;
+  return currp;
+}
+
+inline Expression* getImmediateFallthrough(
+  Expression* curr,
+  const PassOptions& passOptions,
+  Module& module,
+  FallthroughBehavior behavior = FallthroughBehavior::AllowTeeBrIf) {
+  return *getImmediateFallthroughPtr(&curr, passOptions, module, behavior);
 }
 
 // Similar to getImmediateFallthrough, but looks through multiple children to
 // find the final value that falls through.
-inline Expression* getFallthrough(Expression* curr,
-                                  const PassOptions& passOptions,
-                                  FeatureSet features) {
+inline Expression* getFallthrough(
+  Expression* curr,
+  const PassOptions& passOptions,
+  Module& module,
+  FallthroughBehavior behavior = FallthroughBehavior::AllowTeeBrIf) {
   while (1) {
-    auto* next = getImmediateFallthrough(curr, passOptions, features);
+    auto* next = getImmediateFallthrough(curr, passOptions, module, behavior);
     if (next == curr) {
       return curr;
     }
     curr = next;
   }
+}
+
+inline Index getNumChildren(Expression* curr) {
+  Index ret = 0;
+
+#define DELEGATE_ID curr->_id
+
+#define DELEGATE_START(id) [[maybe_unused]] auto* cast = curr->cast<id>();
+
+#define DELEGATE_GET_FIELD(id, field) cast->field
+
+#define DELEGATE_FIELD_CHILD(id, field) ret++;
+
+#define DELEGATE_FIELD_OPTIONAL_CHILD(id, field)                               \
+  if (cast->field) {                                                           \
+    ret++;                                                                     \
+  }
+
+#define DELEGATE_FIELD_INT(id, field)
+#define DELEGATE_FIELD_INT_ARRAY(id, field)
+#define DELEGATE_FIELD_LITERAL(id, field)
+#define DELEGATE_FIELD_NAME(id, field)
+#define DELEGATE_FIELD_NAME_VECTOR(id, field)
+#define DELEGATE_FIELD_SCOPE_NAME_DEF(id, field)
+#define DELEGATE_FIELD_SCOPE_NAME_USE(id, field)
+#define DELEGATE_FIELD_SCOPE_NAME_USE_VECTOR(id, field)
+#define DELEGATE_FIELD_TYPE(id, field)
+#define DELEGATE_FIELD_HEAPTYPE(id, field)
+#define DELEGATE_FIELD_ADDRESS(id, field)
+
+#include "wasm-delegations-fields.def"
+
+  return ret;
 }
 
 // Returns whether the resulting value here must fall through without being
@@ -334,8 +420,54 @@ inline bool canEmitSelectWithArms(Expression* ifTrue, Expression* ifFalse) {
   return ifTrue->type.isSingle() && ifFalse->type.isSingle();
 }
 
-} // namespace Properties
+// A "generative" expression is one that can generate different results for the
+// same inputs, and that difference is *not* explained by other expressions that
+// interact with this one. This is an intrinsic/internal property of the
+// expression.
+//
+// To see the issue more concretely, consider these:
+//
+//    x = load(100);
+//    ..
+//    y = load(100);
+//
+//  versus
+//
+//    x = struct.new();
+//    ..
+//    y = struct.new();
+//
+// Are x and y identical in both cases? For loads, we can look at the code
+// in ".." to see: if there are no possible stores to memory, then the
+// result is identical (and we have EffectAnalyzer for that). For the GC
+// allocations, though, it doesn't matter what is in "..": there is nothing
+// in the wasm that we can check to find out if the results are the same or
+// not. (In fact, in this case they are always not the same.) So the
+// generativity is "intrinsic" to the expression and it is because each call to
+// struct.new generates a new value.
+//
+// Thus, loads are nondeterministic but not generative, while GC allocations
+// are in fact generative. Note that "generative" need not mean "allocation" as
+// if wasm were to add "get current time" or "get a random number" instructions
+// then those would also be generative - generating a new current time value or
+// a new random number on each execution, respectively.
+//
+//  * Note that NaN nondeterminism is ignored here. It is a valid wasm
+//    implementation to have deterministic NaN behavior, and we optimize under
+//    that simplifying assumption.
+//  * Note that calls are ignored here. In theory this concept could be defined
+//    either way for them - that is, we could potentially define them as
+//    generative, as they might contain such an instruction, or we could define
+//    this property as only looking at code in the current function. We choose
+//    the latter because calls are already handled best in other manners (using
+//    EffectAnalyzer).
+//
+bool isGenerative(Expression* curr, FeatureSet features);
 
-} // namespace wasm
+// Whether this expression is valid in a context where WebAssembly requires a
+// constant expression, such as a global initializer.
+bool isValidConstantExpression(Module& wasm, Expression* expr);
+
+} // namespace wasm::Properties
 
 #endif // wasm_ir_properties_h

@@ -45,7 +45,9 @@ public:
                         T* curr,
                         Module* module,
                         LocalGraph* localGraph)
-    : parent(parent), curr(curr), module(module), localGraph(localGraph) {}
+    : parent(parent), curr(curr), module(module), localGraph(localGraph) {
+    memory64 = module->getMemory(curr->memory)->is64();
+  }
 
   // Tries to optimize, and returns whether we propagated a change.
   bool optimize() {
@@ -56,7 +58,7 @@ public:
       return false;
     }
     if (auto* add = curr->ptr->template dynCast<Binary>()) {
-      if (add->op == AddInt32) {
+      if (add->op == AddInt32 || add->op == AddInt64) {
         // Look for a constant on both sides.
         if (tryToOptimizeConstant(add->right, add->left) ||
             tryToOptimizeConstant(add->left, add->right)) {
@@ -110,6 +112,7 @@ private:
   T* curr;
   Module* module;
   LocalGraph* localGraph;
+  bool memory64;
 
   void optimizeConstantPointer() {
     // The constant and an offset are interchangeable:
@@ -123,11 +126,23 @@ private:
       // code may know that is valid, even if we can't. Only handle the
       // obviously valid case where an overflow can't occur.
       auto* c = curr->ptr->template cast<Const>();
-      uint32_t base = c->value.geti32();
-      uint32_t offset = curr->offset;
-      if (uint64_t(base) + uint64_t(offset) < (uint64_t(1) << 32)) {
-        c->value = c->value.add(Literal(uint32_t(curr->offset)));
-        curr->offset = 0;
+      if (memory64) {
+        uint64_t base = c->value.geti64();
+        uint64_t offset = curr->offset;
+
+        uint64_t max = std::numeric_limits<uint64_t>::max();
+        bool overflow = (base > max - offset);
+        if (!overflow) {
+          c->value = c->value.add(Literal(offset));
+          curr->offset = 0;
+        }
+      } else {
+        uint32_t base = c->value.geti32();
+        uint32_t offset = curr->offset;
+        if (uint64_t(base) + uint64_t(offset) < (uint64_t(1) << 32)) {
+          c->value = c->value.add(Literal(uint32_t(curr->offset)));
+          curr->offset = 0;
+        }
       }
     }
   }
@@ -174,9 +189,9 @@ private:
         //  y = y + 1
         //  load(x)
         //
-        // This example should not be optimized into
+        // This example should *not* be optimized into
         //
-        //  load(x, offset=10)
+        //  load(y, offset=10)
         //
         // If the other side is a get, we may be able to prove that we can just
         // use that same local, if both it and the pointer are in SSA form. In
@@ -222,9 +237,9 @@ private:
 
   // Sees if we can optimize a particular constant.
   Result canOptimizeConstant(Literal literal) {
-    auto value = literal.geti32();
+    uint64_t value = literal.getInteger();
     // Avoid uninteresting corner cases with peculiar offsets.
-    if (value >= 0 && value < PassOptions::LowMemoryBound) {
+    if (value < PassOptions::LowMemoryBound) {
       // The total offset must not allow reaching reasonable memory
       // by overflowing.
       auto total = curr->offset + value;
@@ -242,11 +257,16 @@ struct OptimizeAddedConstants
                  UnifiedExpressionVisitor<OptimizeAddedConstants>>> {
   bool isFunctionParallel() override { return true; }
 
+  // This pass operates on linear memory, and does not affect reference locals.
+  bool requiresNonNullableLocalFixups() override { return false; }
+
   bool propagate;
 
   OptimizeAddedConstants(bool propagate) : propagate(propagate) {}
 
-  Pass* create() override { return new OptimizeAddedConstants(propagate); }
+  std::unique_ptr<Pass> create() override {
+    return std::make_unique<OptimizeAddedConstants>(propagate);
+  }
 
   void visitLoad(Load* curr) {
     MemoryAccessOptimizer<OptimizeAddedConstants, Load> optimizer(
@@ -276,7 +296,7 @@ struct OptimizeAddedConstants
       helperIndexes.clear();
       propagatable.clear();
       if (propagate) {
-        localGraph = make_unique<LocalGraph>(func);
+        localGraph = std::make_unique<LocalGraph>(func);
         localGraph->computeSetInfluences();
         localGraph->computeSSAIndexes();
         findPropagatable();
@@ -329,8 +349,7 @@ private:
     // but if x has other uses, then avoid doing so - we'll be doing that add
     // anyhow, so the load/store offset trick won't actually help.
     Parents parents(getFunction()->body);
-    for (auto& pair : localGraph->locations) {
-      auto* location = pair.first;
+    for (auto& [location, _] : localGraph->locations) {
       if (auto* set = location->dynCast<LocalSet>()) {
         if (auto* add = set->value->dynCast<Binary>()) {
           if (add->op == AddInt32) {
@@ -360,8 +379,7 @@ private:
   void cleanUpAfterPropagation() {
     // Remove sets that no longer have uses. This allows further propagation by
     // letting us see the accurate amount of uses of each set.
-    UnneededSetRemover remover(
-      getFunction(), getPassOptions(), getModule()->features);
+    UnneededSetRemover remover(getFunction(), getPassOptions(), *getModule());
   }
 
   std::map<LocalSet*, Index> helperIndexes;

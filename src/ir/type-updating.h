@@ -18,17 +18,36 @@
 #define wasm_ir_type_updating_h
 
 #include "ir/branch-utils.h"
+#include "ir/module-utils.h"
+#include "support/insert_ordered.h"
 #include "wasm-traversal.h"
 
 namespace wasm {
 
-// a class that tracks type dependencies between nodes, letting you
-// update types efficiently when removing and altering code.
-// altering code can alter types in the following way:
-//   * removing a break can make a block unreachable, if nothing else
-//     reaches it
-//   * altering the type of a child to unreachable can make the parent
-//     unreachable
+//
+// A class that tracks type dependencies between nodes, letting you update types
+// efficiently when removing and altering code incrementally.
+//
+// Altering code can alter types beyond the current node in the following ways:
+//
+//  1. Removing a break can make a block unreachable, if nothing else reaches
+//     it.
+//  2. Altering the type of a child to unreachable can make the parent
+//     unreachable.
+//
+// Most passes don't do either of the above and can just do replaceCurrent when
+// replacing one thing with another, which is fine as no types need to be
+// updated outside of the item being replaced. Passes that do one of the two
+// things mentioned need to update types in the IR affected by the change (which
+// can include any of the parent nodes, in general) and they have two main ways
+// to do so:
+//
+//  * Call ReFinalize() after making all their changes. The IR will be in an
+//    invalid state while making the changes, and only fixed up at the end by
+//    ReFinalize(), but often that is good enough.
+//  * Use this class, TypeUpdater. This lets you update the IR after each
+//    incremental change that you perform, keeping the IR valid constantly.
+//
 struct TypeUpdater
   : public ExpressionStackWalker<TypeUpdater,
                                  UnifiedExpressionVisitor<TypeUpdater>> {
@@ -229,14 +248,22 @@ struct TypeUpdater
           return; // did not turn
         }
       } else if (auto* iff = curr->dynCast<If>()) {
-        // may not be unreachable if just one side is
+        // We only want to change a concrete type to unreachable here, so undo
+        // anything else. Other changes can be a problem, like refining the type
+        // of an if for GC-using code, as the code all around us only assumes we
+        // are propagating unreachability and not doing a full refinalize.
+        auto old = iff->type;
         iff->finalize();
         if (curr->type != Type::unreachable) {
+          iff->type = old;
           return; // did not turn
         }
       } else if (auto* tryy = curr->dynCast<Try>()) {
+        // See comment on If, above.
+        auto old = tryy->type;
         tryy->finalize();
         if (curr->type != Type::unreachable) {
+          tryy->type = old;
           return; // did not turn
         }
       } else {
@@ -284,9 +311,13 @@ struct TypeUpdater
     if (!curr->type.isConcrete()) {
       return; // nothing concrete to change to unreachable
     }
+    // See comment in propagateTypesUp() for If regarding restoring the type.
+    auto old = curr->type;
     curr->finalize();
     if (curr->type == Type::unreachable) {
       propagateTypesUp(curr);
+    } else {
+      curr->type = old;
     }
   }
 
@@ -294,14 +325,169 @@ struct TypeUpdater
     if (!curr->type.isConcrete()) {
       return; // nothing concrete to change to unreachable
     }
+    // See comment in propagateTypesUp() for Try regarding restoring the type.
+    auto old = curr->type;
     curr->finalize();
     if (curr->type == Type::unreachable) {
       propagateTypesUp(curr);
+    } else {
+      curr->type = old;
     }
   }
 
   bool hasBreaks(Block* block) {
     return block->name.is() && blockInfos[block->name].numBreaks > 0;
+  }
+};
+
+// Rewrites global heap types across an entire module, allowing changes to be
+// made while doing so.
+class GlobalTypeRewriter {
+public:
+  Module& wasm;
+
+  GlobalTypeRewriter(Module& wasm);
+  virtual ~GlobalTypeRewriter() {}
+
+  // Main entry point. This performs the entire process of creating new heap
+  // types and calling the hooks below, then applies the new types throughout
+  // the module.
+  void update();
+
+  using TypeMap = std::unordered_map<HeapType, HeapType>;
+
+  // Given a map of old type => new type to use instead, this rewrites all type
+  // uses in the module to apply that map. This is used internally in update()
+  // but may be useful by itself as well.
+  //
+  // The input map does not need to contain all the types. Whenever a type does
+  // not appear, it is mapped to itself.
+  void mapTypes(const TypeMap& oldToNewTypes);
+
+  // Subclasses can implement these methods to modify the new set of types that
+  // we map to. By default, we simply copy over the types, and these functions
+  // are the hooks to apply changes through. The methods receive as input the
+  // old type, and a structure that they can modify. That structure is the one
+  // used to define the new type in the TypeBuilder.
+  virtual void modifyStruct(HeapType oldType, Struct& struct_) {}
+  virtual void modifyArray(HeapType oldType, Array& array) {}
+  virtual void modifySignature(HeapType oldType, Signature& sig) {}
+
+  // Subclasses can override this method to modify supertypes. The new
+  // supertype, if any, must be a supertype (or the same as) the original
+  // supertype.
+  virtual std::optional<HeapType> getSuperType(HeapType oldType) {
+    return oldType.getSuperType();
+  }
+
+  // Map an old type to a temp type. This can be called from the above hooks,
+  // so that they can use a proper temp type of the TypeBuilder while modifying
+  // things.
+  Type getTempType(Type type);
+  Type getTempTupleType(Tuple tuple);
+
+  using SignatureUpdates = std::unordered_map<HeapType, Signature>;
+
+  // Helper for the repeating pattern of just updating Signature types using a
+  // map of old heap type => new Signature.
+  static void updateSignatures(const SignatureUpdates& updates, Module& wasm) {
+    if (updates.empty()) {
+      return;
+    }
+
+    class SignatureRewriter : public GlobalTypeRewriter {
+      const SignatureUpdates& updates;
+
+    public:
+      SignatureRewriter(Module& wasm, const SignatureUpdates& updates)
+        : GlobalTypeRewriter(wasm), updates(updates) {
+        update();
+      }
+
+      void modifySignature(HeapType oldSignatureType, Signature& sig) override {
+        auto iter = updates.find(oldSignatureType);
+        if (iter != updates.end()) {
+          sig.params = getTempType(iter->second.params);
+          sig.results = getTempType(iter->second.results);
+        }
+      }
+    } rewriter(wasm, updates);
+  }
+
+private:
+  TypeBuilder typeBuilder;
+
+  // Map old types to their indices in the builder.
+  InsertOrderedMap<HeapType, Index> typeIndices;
+};
+
+class TypeMapper : public GlobalTypeRewriter {
+public:
+  using TypeUpdates = std::unordered_map<HeapType, HeapType>;
+
+  const TypeUpdates& mapping;
+
+  std::unordered_map<HeapType, Signature> newSignatures;
+
+public:
+  TypeMapper(Module& wasm, const TypeUpdates& mapping)
+    : GlobalTypeRewriter(wasm), mapping(mapping) {}
+
+  void map() {
+    // Map the types of expressions (curr->type, etc.) to their merged
+    // types.
+    mapTypes(mapping);
+
+    // Update the internals of types (struct fields, signatures, etc.) to
+    // refer to the merged types.
+    update();
+  }
+
+  Type getNewType(Type type) {
+    if (!type.isRef()) {
+      return type;
+    }
+    auto heapType = type.getHeapType();
+    auto iter = mapping.find(heapType);
+    if (iter != mapping.end()) {
+      return getTempType(Type(iter->second, type.getNullability()));
+    }
+    return getTempType(type);
+  }
+
+  void modifyStruct(HeapType oldType, Struct& struct_) override {
+    auto& oldFields = oldType.getStruct().fields;
+    for (Index i = 0; i < oldFields.size(); i++) {
+      auto& oldField = oldFields[i];
+      auto& newField = struct_.fields[i];
+      newField.type = getNewType(oldField.type);
+    }
+  }
+  void modifyArray(HeapType oldType, Array& array) override {
+    array.element.type = getNewType(oldType.getArray().element.type);
+  }
+  void modifySignature(HeapType oldSignatureType, Signature& sig) override {
+    auto getUpdatedTypeList = [&](Type type) {
+      std::vector<Type> vec;
+      for (auto t : type) {
+        vec.push_back(getNewType(t));
+      }
+      return getTempTupleType(vec);
+    };
+
+    auto oldSig = oldSignatureType.getSignature();
+    sig.params = getUpdatedTypeList(oldSig.params);
+    sig.results = getUpdatedTypeList(oldSig.results);
+  }
+  std::optional<HeapType> getSuperType(HeapType oldType) override {
+    // If the super is mapped, get it from the mapping.
+    auto super = oldType.getSuperType();
+    if (super) {
+      if (auto it = mapping.find(*super); it != mapping.end()) {
+        return it->second;
+      }
+    }
+    return super;
   }
 };
 
@@ -316,6 +502,34 @@ bool canHandleAsLocal(Type type);
 // their uses (which keeps the type of the users identical).
 // This may also handle other types of nondefaultable locals in the future.
 void handleNonDefaultableLocals(Function* func, Module& wasm);
+
+// Returns the type that a local should be, after handling of non-
+// defaultability.
+Type getValidLocalType(Type type, FeatureSet features);
+
+// Given a local.get, returns a proper replacement for it, taking into account
+// the extra work we need to do to handle non-defaultable values (e.g., add a
+// ref.as_non_null around it, if the local should be non-nullable but is not).
+Expression* fixLocalGet(LocalGet* get, Module& wasm);
+
+// Applies new types of parameters to a function. This does all the necessary
+// changes aside from altering the function type, which the caller is expected
+// to do after we run (the caller might simply change the type, but in other
+// cases the caller  might be rewriting the types and need to preserve their
+// identity in terms of nominal typing, so we don't change the type here). The
+// specific things this function does are to update the types of local.get/tee
+// operations, refinalize, etc., basically all operations necessary to ensure
+// validation with the new types.
+//
+// While doing so, we can either update or not update the types of local.get and
+// local.tee operations. (We do not update them here if we'll be doing an update
+// later in the caller, which is the case if we are rewriting function types).
+enum LocalUpdatingMode { Update, DoNotUpdate };
+
+void updateParamTypes(Function* func,
+                      const std::vector<Type>& newParamTypes,
+                      Module& wasm,
+                      LocalUpdatingMode localUpdating = Update);
 
 } // namespace TypeUpdating
 

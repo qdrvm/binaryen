@@ -4,13 +4,13 @@
 (module
  ;; CHECK:      (type $none (func))
  (type $none (func))
- ;; CHECK:      (func $foo
+ ;; CHECK:      (func $foo (type $none)
  ;; CHECK-NEXT:  (local $0 (funcref (ref null $none)))
  ;; CHECK-NEXT:  (local $1 funcref)
  ;; CHECK-NEXT:  (local.set $0
  ;; CHECK-NEXT:   (block $label$1 (result funcref (ref $none))
  ;; CHECK-NEXT:    (tuple.make
- ;; CHECK-NEXT:     (ref.null func)
+ ;; CHECK-NEXT:     (ref.null nofunc)
  ;; CHECK-NEXT:     (ref.func $foo)
  ;; CHECK-NEXT:    )
  ;; CHECK-NEXT:   )
@@ -36,7 +36,7 @@
  (func $foo
   (drop
    ;; a tuple type with a non-nullable element, that must be carefully handled
-   (block (result funcref (ref $none))
+   (block $block (result funcref (ref $none))
     (tuple.make
      (ref.null func)
      (ref.func $foo)

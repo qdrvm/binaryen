@@ -16,6 +16,7 @@
 
 #include "support/file.h"
 #include "support/debug.h"
+#include "support/utilities.h"
 
 #include <cstdint>
 #include <cstdlib>
@@ -34,8 +35,22 @@ std::vector<char> wasm::read_stdin() {
   return input;
 }
 
+template<typename T> struct do_read_stdin { T operator()(); };
+
+template<> std::vector<char> do_read_stdin<std::vector<char>>::operator()() {
+  return wasm::read_stdin();
+}
+
+template<> std::string do_read_stdin<std::string>::operator()() {
+  auto vec = wasm::read_stdin();
+  return std::string(vec.begin(), vec.end());
+}
+
 template<typename T>
 T wasm::read_file(const std::string& filename, Flags::BinaryOption binary) {
+  if (filename == "-") {
+    return do_read_stdin<T>{}();
+  }
   BYN_TRACE("Loading '" << filename << "'...\n");
   std::ifstream infile;
   std::ios_base::openmode flags = std::ifstream::in;
@@ -44,18 +59,16 @@ T wasm::read_file(const std::string& filename, Flags::BinaryOption binary) {
   }
   infile.open(filename, flags);
   if (!infile.is_open()) {
-    std::cerr << "Failed opening '" << filename << "'" << std::endl;
-    exit(EXIT_FAILURE);
+    Fatal() << "Failed opening '" << filename << "'";
   }
   infile.seekg(0, std::ios::end);
   std::streampos insize = infile.tellg();
   if (uint64_t(insize) >= std::numeric_limits<size_t>::max()) {
     // Building a 32-bit executable where size_t == 32 bits, we are not able to
     // create strings larger than 2^32 bytes in length, so must abort here.
-    std::cerr << "Failed opening '" << filename
-              << "': Input file too large: " << insize
-              << " bytes. Try rebuilding in 64-bit mode." << std::endl;
-    exit(EXIT_FAILURE);
+    Fatal() << "Failed opening '" << filename
+            << "': Input file too large: " << insize
+            << " bytes. Try rebuilding in 64-bit mode.";
   }
   T input(size_t(insize) + (binary == Flags::Binary ? 0 : 1), '\0');
   if (size_t(insize) == 0) {
@@ -101,8 +114,7 @@ wasm::Output::Output(const std::string& filename, Flags::BinaryOption binary)
         }
         outfile.open(filename, flags);
         if (!outfile.is_open()) {
-          std::cerr << "Failed opening '" << filename << "'" << std::endl;
-          exit(EXIT_FAILURE);
+          Fatal() << "Failed opening '" << filename << "'";
         }
         buffer = outfile.rdbuf();
       }
