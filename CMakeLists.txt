@@ -429,7 +429,7 @@ if(INSTALL_LIBS OR NOT BUILD_STATIC_LIB)
 
   install(DIRECTORY src/ 
     DESTINATION "${CMAKE_INSTALL_INCLUDEDIR}/binaryen" 
-    FILES_MATCHING PATTERN "*.h"
+    FILES_MATCHING PATTERN "*.h" PATTERN "*.def"
   )
 
   export(EXPORT binaryenTargets
