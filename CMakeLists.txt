@@ -341,6 +341,11 @@ endif()
     LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
     ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR})
 
+  install(DIRECTORY src/ 
+    DESTINATION "${CMAKE_INSTALL_INCLUDEDIR}/binaryen" 
+    FILES_MATCHING PATTERN "*.h"
+  )
+
   export(EXPORT binaryenTargets
     FILE "${CMAKE_CURRENT_BINARY_DIR}/cmake/binaryenTargets.cmake"
     NAMESPACE binaryen::
