@@ -28,6 +28,7 @@
 #include <array>
 #include <cassert>
 #include <map>
+#include <unordered_map>
 #include <string>
 #include <vector>
 
@@ -956,10 +957,10 @@ public:
 
 private:
   // TODO: add a build option where Names are just indices, and then these methods are not needed
-  std::map<Name, FunctionType*> functionTypesMap;
-  std::map<Name, Export*> exportsMap; // exports map is by the *exported* name, which is unique
-  std::map<Name, Function*> functionsMap;
-  std::map<Name, Global*> globalsMap;
+  std::unordered_map<Name, FunctionType*> functionTypesMap;
+  std::unordered_map<Name, Export*> exportsMap; // exports map is by the *exported* name, which is unique
+  std::unordered_map<Name, Function*> functionsMap;
+  std::unordered_map<Name, Global*> globalsMap;
 
 public:
   Module() = default;;
