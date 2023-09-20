@@ -255,7 +255,7 @@ void CoalesceLocals::pickIndicesFromOrder(std::vector<Index>& order, std::vector
     // merge new interferences and copies for the new index
     for (Index k = i + 1; k < numLocals; k++) {
       auto j = order[k]; // go in the order, we only need to update for those we will see later
-      newInterferences[found * numLocals + j] = newInterferences[found * numLocals + j] | interferes(actual, j);
+      newInterferences[found * numLocals + j] = newInterferences[found * numLocals + j] || interferes(actual, j);
       newCopies[found * numLocals + j] += getCopies(actual, j);
     }
   }
