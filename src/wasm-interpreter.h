@@ -752,6 +752,8 @@ public:
   // an imported function or accessing memory.
   //
   struct ExternalInterface {
+    virtual ~ExternalInterface() = default;
+
     virtual void init(Module& wasm, SubType& instance) {}
     virtual void importGlobals(GlobalManager& globals, Module& wasm) = 0;
     virtual Literal callImport(Function* import, LiteralList& arguments) = 0;
