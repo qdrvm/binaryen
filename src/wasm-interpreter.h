@@ -758,7 +758,8 @@ public:
     virtual void importGlobals(GlobalManager& globals, Module& wasm) = 0;
     virtual Literal callImport(Function* import, LiteralList& arguments) = 0;
     virtual Literal callTable(Index index, LiteralList& arguments, Type result, SubType& instance) = 0;
-    virtual void growMemory(Address oldSize, Address newSize) = 0;
+    virtual uint32_t memoryPages() = 0;
+    virtual void memoryPagesGrow(uint32_t oldPages, uint32_t newPages) = 0;
     virtual void trap(const char* why) = 0;
 
     // the default impls for load and store switch on the sizes. you can either
@@ -852,7 +853,7 @@ public:
     // import globals from the outside
     externalInterface->importGlobals(globals, wasm);
     // prepare memory
-    memorySize = wasm.memory.initial;
+    externalInterface->memoryPagesGrow(0, wasm.memory.initial);
     // generate internal (non-imported) globals
     ModuleUtils::iterDefinedGlobals(wasm, [&](Global* global) {
       globals[global->name] = ConstantExpressionRunner<GlobalManager>(globals).visit(global->init).value;
@@ -1140,19 +1141,19 @@ public:
       Flow visitHost(Host *curr) {
         NOTE_ENTER("Host");
         switch (curr->op) {
-          case CurrentMemory: return Literal(int32_t(instance.memorySize));
+          case CurrentMemory: return Literal(int32_t(instance.externalInterface->memoryPages()));
           case GrowMemory: {
             auto fail = Literal(int32_t(-1));
             Flow flow = this->visit(curr->operands[0]);
             if (flow.breaking()) return flow;
-            int32_t ret = instance.memorySize;
+            uint32_t pages = instance.externalInterface->memoryPages();
+            int32_t ret = pages;
             uint32_t delta = flow.value.geti32();
             if (delta > uint32_t(-1) /Memory::kPageSize) return fail;
-            if (instance.memorySize >= uint32_t(-1) - delta) return fail;
-            uint32_t newSize = instance.memorySize + delta;
-            if (newSize > instance.wasm.memory.max) return fail;
-            instance.externalInterface->growMemory(instance.memorySize * Memory::kPageSize, newSize * Memory::kPageSize);
-            instance.memorySize = newSize;
+            if (pages >= uint32_t(-1) - delta) return fail;
+            uint32_t newPages = pages + delta;
+            if (newPages > instance.wasm.memory.max) return fail;
+            instance.externalInterface->memoryPagesGrow(pages, newPages);
             return Literal(int32_t(ret));
           }
         }
@@ -1222,8 +1223,6 @@ public:
 
 protected:
 
-  Address memorySize; // in pages
-
   void trapIfGt(uint64_t lhs, uint64_t rhs, const char* msg) {
     if (lhs > rhs) {
       std::stringstream ss;
@@ -1234,7 +1233,7 @@ protected:
 
   template<class LS>
   Address getFinalAddress(LS* curr, Literal ptr) {
-    Address memorySizeBytes = memorySize * Memory::kPageSize;
+    Address memorySizeBytes = externalInterface->memoryPages() * Memory::kPageSize;
     uint64_t addr = ptr.type == i32 ? ptr.geti32() : ptr.geti64();
     trapIfGt(curr->offset, memorySizeBytes, "offset > memory");
     trapIfGt(addr, memorySizeBytes - curr->offset, "final > memory");
@@ -1245,14 +1244,14 @@ protected:
   }
 
   Address getFinalAddress(Literal ptr, Index bytes) {
-    Address memorySizeBytes = memorySize * Memory::kPageSize;
+    Address memorySizeBytes = externalInterface->memoryPages() * Memory::kPageSize;
     uint64_t addr = ptr.type == i32 ? ptr.geti32() : ptr.geti64();
     trapIfGt(addr, memorySizeBytes - bytes, "highest > memory");
     return addr;
   }
 
   void checkLoadAddress(Address addr, Index bytes) {
-    Address memorySizeBytes = memorySize * Memory::kPageSize;
+    Address memorySizeBytes = externalInterface->memoryPages() * Memory::kPageSize;
     trapIfGt(addr, memorySizeBytes - bytes, "highest > memory");
   }
 
