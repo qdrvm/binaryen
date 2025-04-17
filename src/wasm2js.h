@@ -51,7 +51,7 @@ IString ASM_FUNC("asmFunc"),
         EXPRESSION_RESULT("wasm2js$expresult"); // result in an expression, no temp var
 
 // Appends extra to block, flattening out if extra is a block as well
-void flattenAppend(Ref ast, Ref extra) {
+inline void flattenAppend(Ref ast, Ref extra) {
   int index;
   if (ast[0] == BLOCK || ast[0] == TOPLEVEL) index = 1;
   else if (ast[0] == DEFUN) index = 3;
